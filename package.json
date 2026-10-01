@@ -3,18 +3,20 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
+    "dev": "npm run prepare-assets && next dev",
+    "build": "npm run prepare-assets && next build",
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run",
     "data:fetch-roads": "node scripts/fetchSfRoads.mjs",
     "data:import-bike-lanes": "node scripts/importSfmtaBikeLanes.mjs",
     "ml:export-features": "tsx scripts/exportTrainingFeatures.ts",
-    "data:fetch-bike-graph": "node scripts/fetchSfBikeGraph.mjs"
+    "data:fetch-bike-graph": "node scripts/fetchSfBikeGraph.mjs",
+    "prepare-assets": "node scripts/copyMaplibreWorker.mjs"
   },
   "dependencies": {
     "@react-google-maps/api": "^2.20.8",
+    "maplibre-gl": "^6.11.2",
     "next": "16.2.12",
     "react": "19.2.4",
     "react-dom": "19.2.4"

@@ -1,9 +1,12 @@
 "use client";
 
 import { useJsApiLoader } from "@react-google-maps/api";
+import dynamic from "next/dynamic";
 import { useEffect, useRef, useState } from "react";
 import AddressSearch from "@/components/AddressSearch";
 import MapView from "@/components/MapView";
+// Loaded lazily: maplibre-gl is ~900KB and only needed when a tour opens.
+const Route3DTour = dynamic(() => import("@/components/Route3DTour"), { ssr: false });
 import {
   SF_DANGEROUS_NEIGHBORHOODS,
   neighborhoodRiskColor,
@@ -104,6 +107,7 @@ export default function Home() {
   const [destinationText, setDestinationText] = useState("");
   const [modelMeta, setModelMeta] = useState<{ modelSource: string; modelVersion: string } | null>(null);
   const [confirmed, setConfirmed] = useState(false);
+  const [tourOpen, setTourOpen] = useState(false);
   const [computingSafer, setComputingSafer] = useState(false);
   const [routingError, setRoutingError] = useState<string | null>(null);
 
@@ -144,6 +148,7 @@ export default function Home() {
 
   function resetRouteState() {
     routeRequestIdRef.current++; // invalidate any in-flight search
+    setTourOpen(false);
     setRoutes({});
     setSelectedRouteKind("fastest");
     setConfirmed(false);
@@ -455,6 +460,14 @@ export default function Home() {
 
             <button
               type="button"
+              onClick={() => setTourOpen(true)}
+              disabled={!activeRoute || activeRoute.path.length < 2}
+              className="rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-black hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              View 3D tour
+            </button>
+            <button
+              type="button"
               onClick={() => setConfirmed(true)}
               disabled={!activeRoute}
               className="rounded-md bg-blue-600 px-3 py-1.5 text-sm font-medium text-white disabled:cursor-not-allowed disabled:bg-slate-300"
@@ -494,7 +507,8 @@ export default function Home() {
         )}
       </aside>
 
-      <main className="flex-1">
+      {/* relative so the 3D tour overlay can position against the map area */}
+      <main className="relative flex-1">
         <MapView
           center={data?.city.center ?? { lat: 37.7749, lng: -122.4194 }}
           isLoaded={isLoaded}
@@ -504,6 +518,13 @@ export default function Home() {
           dangerZones={showNeighborhoodView ? (data?.dangerZones ?? []) : []}
           dangerousNeighborhoods={showNeighborhoodView ? SF_DANGEROUS_NEIGHBORHOODS : []}
         />
+        {tourOpen && activeRoute && (
+          <Route3DTour
+            path={activeRoute.path}
+            profile={activeRoute.profile}
+            onClose={() => setTourOpen(false)}
+          />
+        )}
       </main>
     </div>
   );
