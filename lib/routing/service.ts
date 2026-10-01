@@ -4,6 +4,8 @@ import path from "node:path";
 import type { BikeLaneTier, LatLng } from "../types";
 import { ALL_MOCK_CRASHES } from "../mockData";
 import { REAL_SF_HIGHWAYS } from "../dataSources/sfHighways";
+import { REAL_SF_BIKE_LANES } from "../dataSources/sfmtaBikeLanes";
+import { applySfmtaLaneTiers, type LaneMatchStats } from "../scoring/laneMatch";
 import { buildFeatureContext, extractFeatures } from "../scoring/features";
 import { createBaselineModel, PrecomputedScoreModel, type SafetyModel } from "../scoring/model";
 import { loadModelArtifact } from "../scoring/artifact";
@@ -42,6 +44,8 @@ export interface RoutingEngine {
    * passes happily while production silently scores against mock data.
    */
   highwaySegmentCount: number;
+  /** Outcome of reconciling OSM tags against SFMTA's official bikeway network. */
+  laneMatch: LaneMatchStats;
 }
 
 let engine: RoutingEngine | null = null;
@@ -82,6 +86,12 @@ export function getRoutingEngine(): RoutingEngine {
   if (engine) return engine;
 
   const graph = decodeGraph(rawGraph as Parameters<typeof decodeGraph>[0]);
+
+  // Must run BEFORE features are extracted: `laneProtection` and
+  // `isCycleway` read `edge.tier`, so correcting tiers afterwards would
+  // leave every score computed from the wrong infrastructure.
+  const laneMatch = applySfmtaLaneTiers(graph.edges, graph.nodes, REAL_SF_BIKE_LANES);
+
   const { model, source } = loadModel(graph);
 
   const ctx = buildFeatureContext(ALL_MOCK_CRASHES, REAL_SF_HIGHWAYS, graph.nodes);
@@ -114,6 +124,7 @@ export function getRoutingEngine(): RoutingEngine {
     model,
     modelSource: source,
     highwaySegmentCount: REAL_SF_HIGHWAYS.length,
+    laneMatch,
   };
   return engine;
 }

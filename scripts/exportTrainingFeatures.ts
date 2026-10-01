@@ -21,6 +21,8 @@ import { fileURLToPath } from "node:url";
 
 import { ALL_MOCK_CRASHES } from "../lib/mockData";
 import { REAL_SF_HIGHWAYS } from "../lib/dataSources/sfHighways";
+import { REAL_SF_BIKE_LANES } from "../lib/dataSources/sfmtaBikeLanes";
+import { applySfmtaLaneTiers } from "../lib/scoring/laneMatch";
 import {
   FEATURE_ORDER,
   FEATURE_SET_VERSION,
@@ -34,6 +36,15 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 
 function main() {
   const graph = decodeGraph(rawGraph as Parameters<typeof decodeGraph>[0]);
+  // Identical correction to the one getRoutingEngine applies - otherwise
+  // the model trains on OSM tiers and serves on SFMTA tiers, which is
+  // train/serve skew of exactly the kind this pipeline is built to avoid.
+  const laneMatch = applySfmtaLaneTiers(graph.edges, graph.nodes, REAL_SF_BIKE_LANES);
+  process.stdout.write(
+    `SFMTA lane reconciliation: matched ${laneMatch.matched}, changed ${laneMatch.changed}, ` +
+      `upgraded to protected ${laneMatch.upgradedToProtected}\n`
+  );
+
   const ctx = buildFeatureContext(ALL_MOCK_CRASHES, REAL_SF_HIGHWAYS, graph.nodes);
 
   // Identifying columns first, then the feature vector in FEATURE_ORDER.
