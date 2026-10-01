@@ -19,7 +19,8 @@ import { writeFileSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { ALL_MOCK_CRASHES, MOCK_HIGHWAY_SEGMENTS } from "../lib/mockData";
+import { ALL_MOCK_CRASHES } from "../lib/mockData";
+import { REAL_SF_HIGHWAYS } from "../lib/dataSources/sfHighways";
 import {
   FEATURE_ORDER,
   FEATURE_SET_VERSION,
@@ -33,7 +34,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 
 function main() {
   const graph = decodeGraph(rawGraph as Parameters<typeof decodeGraph>[0]);
-  const ctx = buildFeatureContext(ALL_MOCK_CRASHES, MOCK_HIGHWAY_SEGMENTS, graph.nodes);
+  const ctx = buildFeatureContext(ALL_MOCK_CRASHES, REAL_SF_HIGHWAYS, graph.nodes);
 
   // Identifying columns first, then the feature vector in FEATURE_ORDER.
   // `edge_id` is what a precomputed score table is keyed by, and

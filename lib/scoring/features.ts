@@ -134,12 +134,57 @@ const ARTERIAL_INFLUENCE_METERS = 250;
  * scanning all crashes for each of ~240k directed edges would be ~10^8
  * distance checks, so crashes go into a grid first.
  */
+/**
+ * Grid index over highway geometry.
+ *
+ * Needed because the real exposure dataset is ~5,600 roads, not the 7
+ * hand-drawn shapes this used to run on. Testing every road against every
+ * one of ~211k directed edges is ~1.2 billion distance-to-polyline
+ * computations; bucketing cuts it to the handful of roads actually near
+ * each edge.
+ */
+export interface HighwayIndex {
+  segments: HighwaySegment[];
+  /** cell key -> indices into `segments` */
+  buckets: Map<string, number[]>;
+}
+
 export interface FeatureContext {
   crashBuckets: Map<string, CrashRecord[]>;
-  freeways: HighwaySegment[];
-  arterials: HighwaySegment[];
+  freeways: HighwayIndex;
+  arterials: HighwayIndex;
   nodes: LatLng[];
   neighborhoods: DangerousNeighborhood[];
+}
+
+// Must be >= the largest influence radius below, so a single ring of
+// neighbouring cells is guaranteed to cover everything in range.
+const HIGHWAY_CELL_METERS = 500;
+
+function cellKey(p: LatLng, cellMeters: number): string {
+  const mPerLng = 111_320 * Math.cos((p.lat * Math.PI) / 180);
+  return `${Math.floor((p.lat * M_PER_DEG_LAT) / cellMeters)},${Math.floor(
+    (p.lng * mPerLng) / cellMeters
+  )}`;
+}
+
+function buildHighwayIndex(segments: HighwaySegment[]): HighwayIndex {
+  const buckets = new Map<string, number[]>();
+  segments.forEach((seg, i) => {
+    // Register the road in every cell any of its vertices falls in. Long
+    // roads therefore appear in many cells, which is exactly right - a
+    // freeway is "near" everywhere along its length.
+    const seen = new Set<string>();
+    for (const pt of seg.path) {
+      const k = cellKey(pt, HIGHWAY_CELL_METERS);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      const b = buckets.get(k);
+      if (b) b.push(i);
+      else buckets.set(k, [i]);
+    }
+  });
+  return { segments, buckets };
 }
 
 const CRASH_BUCKET_METERS = 200;
@@ -167,8 +212,8 @@ export function buildFeatureContext(
   }
   return {
     crashBuckets,
-    freeways: highways.filter((h) => h.type === "freeway"),
-    arterials: highways.filter((h) => h.type === "arterial"),
+    freeways: buildHighwayIndex(highways.filter((h) => h.type === "freeway")),
+    arterials: buildHighwayIndex(highways.filter((h) => h.type === "arterial")),
     nodes,
     neighborhoods,
   };
@@ -211,14 +256,34 @@ function neighborhoodRiskAt(point: LatLng, areas: DangerousNeighborhood[]): numb
   return worst;
 }
 
-function proximity(point: LatLng, segments: HighwaySegment[], influenceMeters: number): number {
-  let best = 0;
-  for (const s of segments) {
-    const d = distanceToPathMeters(point, s.path);
-    if (d >= influenceMeters) continue;
-    best = Math.max(best, 1 - d / influenceMeters);
+/**
+ * Closeness to the nearest road in `index`, 0 (at/outside the influence
+ * radius) to 1 (on top of it). Scaled by how fast the road typically runs,
+ * so a 65mph freeway reads as more exposure than a 30mph arterial at the
+ * same distance.
+ */
+function proximity(point: LatLng, index: HighwayIndex, influenceMeters: number): number {
+  const mPerLng = 111_320 * Math.cos((point.lat * Math.PI) / 180);
+  const row = Math.floor((point.lat * M_PER_DEG_LAT) / HIGHWAY_CELL_METERS);
+  const col = Math.floor((point.lng * mPerLng) / HIGHWAY_CELL_METERS);
+
+  const candidates = new Set<number>();
+  for (let dr = -1; dr <= 1; dr++) {
+    for (let dc = -1; dc <= 1; dc++) {
+      const b = index.buckets.get(`${row + dr},${col + dc}`);
+      if (b) for (const i of b) candidates.add(i);
+    }
   }
-  return best;
+
+  let best = 0;
+  for (const i of candidates) {
+    const seg = index.segments[i];
+    const d = distanceToPathMeters(point, seg.path);
+    if (d >= influenceMeters) continue;
+    const speedFactor = Math.min(1.3, (seg.typicalSpeedMph || 35) / 45);
+    best = Math.max(best, (1 - d / influenceMeters) * speedFactor);
+  }
+  return Math.min(1, best);
 }
 
 /**

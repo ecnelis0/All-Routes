@@ -2,7 +2,8 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 
 import type { BikeLaneTier, LatLng } from "../types";
-import { ALL_MOCK_CRASHES, MOCK_HIGHWAY_SEGMENTS } from "../mockData";
+import { ALL_MOCK_CRASHES } from "../mockData";
+import { REAL_SF_HIGHWAYS } from "../dataSources/sfHighways";
 import { buildFeatureContext, extractFeatures } from "../scoring/features";
 import { createBaselineModel, PrecomputedScoreModel, type SafetyModel } from "../scoring/model";
 import { loadModelArtifact } from "../scoring/artifact";
@@ -32,6 +33,15 @@ export interface RoutingEngine {
   model: SafetyModel;
   /** Set when a trained artifact was found; null means the baseline is in use. */
   modelSource: "trained" | "baseline";
+  /**
+   * How many freeway/arterial segments the scoring context was built with.
+   *
+   * Exposed so a test can assert the engine is wired to the real ~5,600-road
+   * dataset rather than the 7 mock shapes. Without this the wiring is
+   * untestable from outside: a test that builds its own feature context
+   * passes happily while production silently scores against mock data.
+   */
+  highwaySegmentCount: number;
 }
 
 let engine: RoutingEngine | null = null;
@@ -74,7 +84,7 @@ export function getRoutingEngine(): RoutingEngine {
   const graph = decodeGraph(rawGraph as Parameters<typeof decodeGraph>[0]);
   const { model, source } = loadModel(graph);
 
-  const ctx = buildFeatureContext(ALL_MOCK_CRASHES, MOCK_HIGHWAY_SEGMENTS, graph.nodes);
+  const ctx = buildFeatureContext(ALL_MOCK_CRASHES, REAL_SF_HIGHWAYS, graph.nodes);
   const scores = new Float32Array(graph.edges.length);
 
   // Both directions of a two-way street share identical features, so score
@@ -97,7 +107,14 @@ export function getRoutingEngine(): RoutingEngine {
     seen.set(key, s);
   }
 
-  engine = { graph, index: new NodeSpatialIndex(graph.nodes), scores, model, modelSource: source };
+  engine = {
+    graph,
+    index: new NodeSpatialIndex(graph.nodes),
+    scores,
+    model,
+    modelSource: source,
+    highwaySegmentCount: REAL_SF_HIGHWAYS.length,
+  };
   return engine;
 }
 

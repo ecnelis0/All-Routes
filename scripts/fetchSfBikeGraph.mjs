@@ -55,6 +55,32 @@ const ROUTABLE_HIGHWAY = {
 // Bikes are banned on these no matter what else the tags say.
 const BANNED_HIGHWAY = new Set(["motorway", "motorway_link", "trunk", "trunk_link"]);
 
+// Roads that are a *hazard to ride near* even though (or precisely because)
+// you cannot ride on them. These feed the `freewayProximity` and
+// `arterialProximity` features, not the routable graph.
+//
+// Previously this risk came from seven hand-drawn mock shapes
+// (MOCK_HIGHWAY_SEGMENTS), which meant the overwhelming majority of San
+// Francisco's real arterials - Bayshore, James Lick, Junipero Serra,
+// Octavia, Bryant, 19th Ave and ~170 others - contributed exactly zero
+// highway-exposure risk. A route could hug the Central Freeway for a mile
+// and the model would not notice.
+const EXPOSURE_CLASS = {
+  motorway: "freeway",
+  motorway_link: "freeway",
+  trunk: "freeway",
+  trunk_link: "freeway",
+  primary: "arterial",
+  primary_link: "arterial",
+  secondary: "arterial",
+  secondary_link: "arterial",
+};
+
+// Typical speeds by class, used to scale exposure risk where OSM has no
+// maxspeed tag. Rough, and only a feature input - the model decides how
+// much speed actually matters.
+const DEFAULT_SPEED_MPH = { freeway: 60, arterial: 35 };
+
 function overpassQuery() {
   const bbox = `${BOUNDS.south},${BOUNDS.west},${BOUNDS.north},${BOUNDS.east}`;
   return `
@@ -179,10 +205,33 @@ function main() {
     let skippedBanned = 0;
     let skippedUnroutable = 0;
 
+    const exposureRoads = [];
+
     for (const el of elements) {
       if (el.type !== "way" || !el.geometry || !el.nodes) continue;
       const tags = el.tags ?? {};
       const hw = (tags.highway ?? "").toLowerCase();
+
+      // Record proximity hazards before the routability filters below drop
+      // them - freeways in particular are *excluded from the graph* yet are
+      // the single biggest exposure risk, so they must be captured here or
+      // they are lost entirely.
+      const exposure = EXPOSURE_CLASS[hw];
+      if (exposure) {
+        const mph =
+          parseInt((tags.maxspeed ?? "").replace(/[^0-9]/g, ""), 10) ||
+          DEFAULT_SPEED_MPH[exposure];
+        exposureRoads.push({
+          id: `osm-${el.id}`,
+          name: tags.name ?? (exposure === "freeway" ? "Unnamed freeway" : "Unnamed arterial"),
+          type: exposure,
+          typicalSpeedMph: mph,
+          path: el.geometry.map((g) => ({
+            lat: Math.round(g.lat * 1e6) / 1e6,
+            lng: Math.round(g.lon * 1e6) / 1e6,
+          })),
+        });
+      }
 
       if (BANNED_HIGHWAY.has(hw)) {
         skippedBanned++;
@@ -295,6 +344,21 @@ function main() {
       lengthMeters: edges.map((e) => Math.round(e.lengthMeters * 10) / 10),
     };
     writeFileSync(outPath, JSON.stringify(payload));
+
+    const hwPath = path.join(outDir, "sfHighways.json");
+    writeFileSync(
+      hwPath,
+      JSON.stringify({
+        generatedAt: payload.generatedAt,
+        source: payload.source,
+        segments: exposureRoads,
+      })
+    );
+    const expCounts = {};
+    for (const r of exposureRoads) expCounts[r.type] = (expCounts[r.type] ?? 0) + 1;
+    process.stdout.write(
+      `Wrote ${hwPath}\n  exposure roads: ${JSON.stringify(expCounts)}\n`
+    );
 
     const tierCounts = {};
     for (const e of edges) tierCounts[e.tier] = (tierCounts[e.tier] ?? 0) + 1;
