@@ -42,3 +42,8 @@ next-env.d.ts
 
 # Cached raw Overpass response (regenerate with scripts/fetchSfBikeGraph.mjs --refresh)
 node_modules/.cache/
+
+# Python training env and exported feature matrix (regenerate: npm run ml:export-features)
+.venv/
+ml/data/edge_features.csv
+__pycache__/

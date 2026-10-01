@@ -3,6 +3,11 @@
 import { Autocomplete, useJsApiLoader } from "@react-google-maps/api";
 import { useEffect, useRef, useState } from "react";
 import MapView from "@/components/MapView";
+import {
+  SF_DANGEROUS_NEIGHBORHOODS,
+  neighborhoodRiskColor,
+  neighborhoodRiskLabel,
+} from "@/lib/data/sfDangerousNeighborhoods";
 import { createGoogleDirectionsRouter } from "@/lib/googleDirections";
 import { DEMO_CITY } from "@/lib/mockData";
 import { computeRouteOptions, improvedRiskPercent } from "@/lib/routing";
@@ -312,11 +317,44 @@ export default function Home() {
             </span>
           </button>
           {showNeighborhoodView && (
-            <p className="text-[11px] leading-snug text-black">
-              Circles mark every known danger zone (Tenderloin, Mid-Market, 6th St, 16th/24th &amp;
-              Mission, Civic Center, Bayview, Sunnydale, and more) - routes are automatically
-              detoured around these when possible.
-            </p>
+            <div className="flex flex-col gap-1.5">
+              <p className="text-[11px] leading-snug text-black">
+                Shaded circles are flagged neighbourhoods; small circles are crash hotspots.
+                Routing actively avoids both - the safer profiles treat area risk as a cost,
+                not a suggestion.
+              </p>
+              <div className="flex flex-wrap gap-x-3 gap-y-1">
+                {[85, 70, 55].map((risk) => (
+                  <span key={risk} className="flex items-center gap-1 text-[11px] text-black">
+                    <span
+                      className="inline-block h-2.5 w-2.5 rounded-full"
+                      style={{
+                        background: neighborhoodRiskColor(risk),
+                        opacity: 0.55,
+                        border: `1px solid ${neighborhoodRiskColor(risk)}`,
+                      }}
+                    />
+                    {neighborhoodRiskLabel(risk)}
+                  </span>
+                ))}
+              </div>
+              <details className="text-[11px] text-black">
+                <summary className="cursor-pointer select-none">
+                  {SF_DANGEROUS_NEIGHBORHOODS.length} flagged areas
+                </summary>
+                <ul className="mt-1 grid grid-cols-2 gap-x-2 gap-y-0.5">
+                  {SF_DANGEROUS_NEIGHBORHOODS.map((a) => (
+                    <li key={a.id} className="flex items-center gap-1">
+                      <span
+                        className="inline-block h-2 w-2 shrink-0 rounded-full"
+                        style={{ background: neighborhoodRiskColor(a.risk) }}
+                      />
+                      <span className="truncate">{a.name}</span>
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            </div>
           )}
         </section>
 
@@ -481,6 +519,7 @@ export default function Home() {
           destination={destination}
           selectedRoute={activeRoute ? { kind: selectedRouteKind, path: activeRoute.path } : null}
           dangerZones={showNeighborhoodView ? (data?.dangerZones ?? []) : []}
+          dangerousNeighborhoods={showNeighborhoodView ? SF_DANGEROUS_NEIGHBORHOODS : []}
         />
       </main>
     </div>

@@ -126,6 +126,11 @@ export const BASELINE_COEFFICIENTS: Record<keyof EdgeFeatures, number> = {
   arterialProximity: 14,
   speedNormalized: 8,
   roadClassRisk: 18,
+  // Scaled so a SEVERE (85) area contributes ~21 points and an ELEVATED
+  // (55) one ~14 - comparable to losing a protected lane, not an outright
+  // veto. The hard-avoid ceilings in lib/routing/cost.ts are what express
+  // "never", and they should stay the only thing that does.
+  neighborhoodRisk: 0.25,
   lengthKm: 0,
 };
 

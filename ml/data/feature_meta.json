@@ -1,0 +1,18 @@
+{
+  "featureSetVersion": 2,
+  "featureOrder": [
+    "crashDensity",
+    "severeCrashDensity",
+    "laneProtection",
+    "isCycleway",
+    "freewayProximity",
+    "arterialProximity",
+    "speedNormalized",
+    "roadClassRisk",
+    "neighborhoodRisk",
+    "lengthKm"
+  ],
+  "edgeCount": 211221,
+  "graphGeneratedAt": "2026-10-01T06:25:03.874Z",
+  "exportedAt": "2026-10-01T13:48:01.276Z"
+}

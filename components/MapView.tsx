@@ -1,6 +1,10 @@
 "use client";
 
-import { Circle, GoogleMap, Marker, Polyline } from "@react-google-maps/api";
+import { Circle, GoogleMap, Marker, OverlayView, Polyline } from "@react-google-maps/api";
+import {
+  neighborhoodRiskColor,
+  type DangerousNeighborhood,
+} from "@/lib/data/sfDangerousNeighborhoods";
 import { useMemo } from "react";
 import type {
   DangerFactorScores,
@@ -31,6 +35,13 @@ interface MapViewProps {
    * rendered when a non-empty `dangerZones` list is passed in.
    */
   dangerZones?: DangerZone[];
+  /**
+   * Neighbourhood-scale flagged areas (lib/data/sfDangerousNeighborhoods.ts),
+   * drawn under the crash-cluster zones and labelled by name. Separate prop
+   * rather than merged into `dangerZones` because the two mean different
+   * things at different scales and the user toggles them independently.
+   */
+  dangerousNeighborhoods?: DangerousNeighborhood[];
   /**
    * Optional colored safety road-network overlay - not shown by default
    * (the app opens on a stock, uncluttered map), only rendered when a
@@ -112,6 +123,7 @@ export default function MapView({
   destination,
   selectedRoute,
   dangerZones = [],
+  dangerousNeighborhoods = [],
   roadSegments = [],
   activeLayer = "overallSafety",
   selectedSegmentId = null,
@@ -136,6 +148,47 @@ export default function MapView({
 
   return (
     <GoogleMap mapContainerStyle={containerStyle} center={center} zoom={13} options={mapOptions}>
+      {dangerousNeighborhoods.map((area) => (
+        <Circle
+          key={area.id}
+          center={area.center}
+          radius={area.radiusMeters}
+          options={{
+            fillColor: neighborhoodRiskColor(area.risk),
+            fillOpacity: 0.16,
+            strokeColor: neighborhoodRiskColor(area.risk),
+            strokeOpacity: 0.65,
+            strokeWeight: 2,
+            clickable: false,
+            // Below the crash-cluster zones (5) so the finer-grained
+            // hotspots stay readable on top of the district wash.
+            zIndex: 2,
+          }}
+        />
+      ))}
+
+      {dangerousNeighborhoods.map((area) => (
+        <OverlayView
+          key={`${area.id}-label`}
+          position={area.center}
+          mapPaneName={OverlayView.OVERLAY_MOUSE_TARGET}
+          getPixelPositionOffset={(w, h) => ({ x: -(w / 2), y: -(h / 2) })}
+        >
+          <span
+            className="pointer-events-none select-none whitespace-nowrap rounded px-1.5 py-0.5 text-[11px] font-semibold text-slate-900"
+            style={{
+              // A plain text label vanishes against the basemap at some
+              // zooms and against the fill at others; a translucent plate
+              // keeps it legible over both.
+              background: "rgba(255,255,255,0.82)",
+              border: `1px solid ${neighborhoodRiskColor(area.risk)}`,
+            }}
+          >
+            {area.name}
+          </span>
+        </OverlayView>
+      ))}
+
       {dangerZones.map((zone) => (
         <Circle
           key={zone.id}

@@ -2,6 +2,10 @@ import type { BikeLaneTier, CrashRecord, HighwaySegment, LatLng } from "../types
 import type { GraphEdge, RoadClass } from "../routing/graph";
 import { distanceToPathMeters } from "../geo";
 import { approxMeters } from "../routing/graph";
+import {
+  SF_DANGEROUS_NEIGHBORHOODS,
+  type DangerousNeighborhood,
+} from "../data/sfDangerousNeighborhoods";
 
 /**
  * THE FEATURE CONTRACT.
@@ -49,11 +53,22 @@ export interface EdgeFeatures {
   speedNormalized: number;
   /** 0-1 road-class severity: residential ~0.1, primary ~1.0. */
   roadClassRisk: number;
+  /**
+   * 0-100 risk of the worst flagged neighbourhood this edge falls inside,
+   * tapering to 0 at the area's edge (see `lib/data/sfDangerousNeighborhoods.ts`).
+   *
+   * Area-level risk, distinct from `crashDensity`'s point-level hotspots:
+   * a street can have a clean crash record and still run through a district
+   * a rider asked not to be routed through.
+   */
+  neighborhoodRisk: number;
   /** Edge length in km - mostly an exposure multiplier for the model. */
   lengthKm: number;
 }
 
-export const FEATURE_SET_VERSION = 1;
+// v2 added `neighborhoodRisk`. Bumping this is what makes an artifact
+// trained on v1 refuse to load rather than silently mis-map coefficients.
+export const FEATURE_SET_VERSION = 2;
 
 /**
  * Positional order for the feature vector handed to a linear/tree model.
@@ -69,6 +84,7 @@ export const FEATURE_ORDER: (keyof EdgeFeatures)[] = [
   "arterialProximity",
   "speedNormalized",
   "roadClassRisk",
+  "neighborhoodRisk",
   "lengthKm",
 ];
 
@@ -123,6 +139,7 @@ export interface FeatureContext {
   freeways: HighwaySegment[];
   arterials: HighwaySegment[];
   nodes: LatLng[];
+  neighborhoods: DangerousNeighborhood[];
 }
 
 const CRASH_BUCKET_METERS = 200;
@@ -138,7 +155,8 @@ function crashBucketKey(p: LatLng): string {
 export function buildFeatureContext(
   crashes: CrashRecord[],
   highways: HighwaySegment[],
-  nodes: LatLng[]
+  nodes: LatLng[],
+  neighborhoods: DangerousNeighborhood[] = SF_DANGEROUS_NEIGHBORHOODS
 ): FeatureContext {
   const crashBuckets = new Map<string, CrashRecord[]>();
   for (const c of crashes) {
@@ -152,6 +170,7 @@ export function buildFeatureContext(
     freeways: highways.filter((h) => h.type === "freeway"),
     arterials: highways.filter((h) => h.type === "arterial"),
     nodes,
+    neighborhoods,
   };
 }
 
@@ -167,6 +186,29 @@ function nearbyCrashes(ctx: FeatureContext, p: LatLng): CrashRecord[] {
     }
   }
   return out;
+}
+
+/**
+ * Worst flagged-neighbourhood risk at a point.
+ *
+ * Risk is held flat across the inner 70% of each circle and tapered to
+ * zero over the outer 30%, rather than peaking at the centre. A
+ * distance-from-centre falloff would be wrong here: these circles
+ * approximate districts, and nothing about a district makes its
+ * geometric centre more dangerous than a block near its edge. The taper
+ * exists only so the router does not see a cliff at the boundary, which
+ * would make routes hug the perimeter in an obviously artificial way.
+ */
+function neighborhoodRiskAt(point: LatLng, areas: DangerousNeighborhood[]): number {
+  let worst = 0;
+  for (const a of areas) {
+    const d = approxMeters(point, a.center);
+    if (d >= a.radiusMeters) continue;
+    const core = a.radiusMeters * 0.7;
+    const risk = d <= core ? a.risk : a.risk * (1 - (d - core) / (a.radiusMeters - core));
+    if (risk > worst) worst = risk;
+  }
+  return worst;
 }
 
 function proximity(point: LatLng, segments: HighwaySegment[], influenceMeters: number): number {
@@ -210,6 +252,7 @@ export function extractFeatures(edge: GraphEdge, ctx: FeatureContext): EdgeFeatu
     arterialProximity: proximity(mid, ctx.arterials, ARTERIAL_INFLUENCE_METERS),
     speedNormalized: edge.maxspeed ? Math.min(2, edge.maxspeed / 45) : 0,
     roadClassRisk: ROAD_CLASS_RISK[edge.roadClass],
+    neighborhoodRisk: neighborhoodRiskAt(mid, ctx.neighborhoods),
     lengthKm: km,
   };
 }

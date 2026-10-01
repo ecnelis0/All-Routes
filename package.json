@@ -9,7 +9,9 @@
     "lint": "eslint",
     "test": "vitest run",
     "data:fetch-roads": "node scripts/fetchSfRoads.mjs",
-    "data:import-bike-lanes": "node scripts/importSfmtaBikeLanes.mjs"
+    "data:import-bike-lanes": "node scripts/importSfmtaBikeLanes.mjs",
+    "ml:export-features": "tsx scripts/exportTrainingFeatures.ts",
+    "data:fetch-bike-graph": "node scripts/fetchSfBikeGraph.mjs"
   },
   "dependencies": {
     "@react-google-maps/api": "^2.20.8",
@@ -25,6 +27,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.2.12",
     "tailwindcss": "^4",
+    "tsx": "^4.23.15",
     "typescript": "^5",
     "vitest": "^4.1.10"
   }

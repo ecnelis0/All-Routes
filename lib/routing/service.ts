@@ -1,12 +1,19 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
+
 import type { BikeLaneTier, LatLng } from "../types";
 import { ALL_MOCK_CRASHES, MOCK_HIGHWAY_SEGMENTS } from "../mockData";
-import { buildFeatureContext, extractFeatures, type EdgeFeatures } from "../scoring/features";
+import { buildFeatureContext, extractFeatures } from "../scoring/features";
 import { createBaselineModel, PrecomputedScoreModel, type SafetyModel } from "../scoring/model";
 import { loadModelArtifact } from "../scoring/artifact";
-import { decodeGraph, NodeSpatialIndex, type BikeGraph, type GraphEdge } from "./graph";
+import { decodeGraph, NodeSpatialIndex, type BikeGraph } from "./graph";
 import { findRoute, type RoutePath } from "./astar";
 import { ROUTE_PROFILES, type RouteProfile } from "./cost";
 import rawGraph from "../data/sfBikeGraph.json";
+import {
+  SF_DANGEROUS_NEIGHBORHOODS,
+  type DangerousNeighborhood,
+} from "../data/sfDangerousNeighborhoods";
 
 /**
  * Process-wide, lazily-built routing state.
@@ -38,14 +45,19 @@ let engine: RoutingEngine | null = null;
  * throws - see the note in `lib/scoring/artifact.ts` on why a silent
  * fallback there would be the worst of both worlds.
  */
+const ARTIFACT_PATH = path.join(process.cwd(), "lib", "data", "model", "safety-model.json");
+
 function loadModel(graph: BikeGraph): { model: SafetyModel; source: "trained" | "baseline" } {
+  // Read from disk rather than `import` the JSON: a static import of a file
+  // that does not exist yet is a hard build failure, and "nothing has been
+  // trained yet" has to be a working state. Reading at runtime also means
+  // retraining is picked up by restarting the server, with no rebuild.
+  //
+  // Server-only by construction - `planRoutes` runs in the API route, never
+  // in the browser bundle.
   let artifact: unknown;
   try {
-    // Deliberately dynamic: webpack/turbopack would hard-fail the build on a
-    // static import of a file that does not exist yet, and "not trained
-    // yet" has to be a working state.
-
-    artifact = require("../data/model/safety-model.json");
+    artifact = JSON.parse(readFileSync(ARTIFACT_PATH, "utf8"));
   } catch {
     return { model: createBaselineModel(), source: "baseline" };
   }
@@ -109,9 +121,34 @@ export interface RouteSummary {
   tierBreakdown: Record<BikeLaneTier, number>;
   /** Named streets the route uses, in order, deduped - a crude turn list. */
   streets: string[];
+  /**
+   * Flagged neighbourhoods the route passes through, with how far it rides
+   * inside each. The headline "did it actually avoid them?" number - a
+   * mean-danger improvement can hide a route that still crosses the same
+   * districts on marginally better streets.
+   */
+  neighborhoodsEntered: { name: string; meters: number }[];
+  /** Total distance ridden inside any flagged neighbourhood. */
+  metersInFlaggedAreas: number;
 }
 
-function summarize(route: RoutePath, scores: Float32Array, profile: RouteProfile): RouteSummary {
+/** Which flagged areas contain this point. */
+function areasContaining(p: LatLng, areas: DangerousNeighborhood[]): DangerousNeighborhood[] {
+  const out: DangerousNeighborhood[] = [];
+  for (const a of areas) {
+    const dLat = (p.lat - a.center.lat) * 111_320;
+    const dLng = (p.lng - a.center.lng) * 111_320 * Math.cos((p.lat * Math.PI) / 180);
+    if (Math.sqrt(dLat * dLat + dLng * dLng) <= a.radiusMeters) out.push(a);
+  }
+  return out;
+}
+
+function summarize(
+  route: RoutePath,
+  scores: Float32Array,
+  profile: RouteProfile,
+  nodes: LatLng[]
+): RouteSummary {
   const tierBreakdown: Record<BikeLaneTier, number> = {
     fullyProtected: 0,
     semiProtected: 0,
@@ -121,6 +158,8 @@ function summarize(route: RoutePath, scores: Float32Array, profile: RouteProfile
   let weightedDanger = 0;
   let maxDanger = 0;
   const streets: string[] = [];
+  const perArea = new Map<string, number>();
+  let metersInFlaggedAreas = 0;
 
   for (const e of route.edges) {
     const s = scores[e.id];
@@ -128,6 +167,19 @@ function summarize(route: RoutePath, scores: Float32Array, profile: RouteProfile
     if (s > maxDanger) maxDanger = s;
     tierBreakdown[e.tier] += e.lengthMeters;
     if (e.name && streets[streets.length - 1] !== e.name) streets.push(e.name);
+
+    // Attributed by edge midpoint - an edge is counted as wholly inside or
+    // wholly outside. At SF block scale (~100m edges against 400m+ areas)
+    // the boundary error is small, and the alternative (clipping each edge
+    // to each circle) buys precision the circles themselves do not have.
+    const a = nodes[e.from];
+    const b = nodes[e.to];
+    const mid = { lat: (a.lat + b.lat) / 2, lng: (a.lng + b.lng) / 2 };
+    const inside = areasContaining(mid, SF_DANGEROUS_NEIGHBORHOODS);
+    if (inside.length > 0) metersInFlaggedAreas += e.lengthMeters;
+    for (const area of inside) {
+      perArea.set(area.name, (perArea.get(area.name) ?? 0) + e.lengthMeters);
+    }
   }
 
   const dist = Math.max(1, route.distanceMeters);
@@ -143,6 +195,10 @@ function summarize(route: RoutePath, scores: Float32Array, profile: RouteProfile
       1000,
     tierBreakdown,
     streets,
+    neighborhoodsEntered: [...perArea.entries()]
+      .map(([name, meters]) => ({ name, meters: Math.round(meters) }))
+      .sort((x, y) => y.meters - x.meters),
+    metersInFlaggedAreas: Math.round(metersInFlaggedAreas),
   };
 }
 
@@ -191,18 +247,58 @@ export function planRoutes(origin: LatLng, destination: LatLng): RouteSummary[] 
       route = findRoute(eng.graph, scoreOf, startNode, goalNode, relaxed);
       if (route) {
         out.push({
-          ...summarize(route, eng.scores, profile),
+          ...summarize(route, eng.scores, profile, eng.graph.nodes),
           label: `${profile.label} (no fully-qualifying route; best effort)`,
         });
         continue;
       }
     }
 
-    if (route) out.push(summarize(route, eng.scores, profile));
+    if (route) out.push(summarize(route, eng.scores, profile, eng.graph.nodes));
   }
 
   if (out.length === 0) {
     throw new RoutingError("No bike route found between these points.");
   }
-  return out;
+
+  return enforceSafetyOrdering(out);
+}
+
+/**
+ * Guarantees the obvious promise: "Safest" is never more dangerous than
+ * "Safer", which is never more dangerous than "Fastest".
+ *
+ * This is not cosmetic. The three profiles solve genuinely different
+ * optimisation problems - a stricter `hardAvoidScore` shrinks the set of
+ * legal routes, so the best route the strict profile can find may be worse,
+ * on mean danger, than one the laxer profile was free to pick. Observed
+ * live: a Richmond -> Potrero trip where "safest" came back at mean danger
+ * 36.6 against "safer" at 35.5, because the 75 ceiling forced it off the
+ * better corridor entirely.
+ *
+ * Both routes are legitimate answers to their own objective, but a rider
+ * who picks "Safest" and is handed the more dangerous of two routes we
+ * already computed has been actively misled. So when a stricter tier is
+ * beaten by a laxer one, it adopts the better route. Tiers can therefore
+ * coincide - which is an honest "we could not do better than this" rather
+ * than a manufactured difference.
+ */
+function enforceSafetyOrdering(routes: RouteSummary[]): RouteSummary[] {
+  const order: RouteProfile["id"][] = ["fastest", "balanced", "safest"];
+  const byProfile = new Map(routes.map((r) => [r.profile, r]));
+
+  for (let i = 1; i < order.length; i++) {
+    const stricter = byProfile.get(order[i]);
+    const laxer = byProfile.get(order[i - 1]);
+    if (!stricter || !laxer) continue;
+    if (laxer.meanDanger < stricter.meanDanger) {
+      byProfile.set(order[i], {
+        ...laxer,
+        profile: stricter.profile,
+        label: stricter.label,
+      });
+    }
+  }
+
+  return order.map((id) => byProfile.get(id)).filter((r): r is RouteSummary => r != null);
 }

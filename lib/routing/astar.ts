@@ -107,6 +107,9 @@ export function findRoute(
       if (closed[edge.to]) continue;
 
       const cost = edgeCost(edge, scoreOf(edgeId), profile);
+      // Pure optimization, not a correctness guard: an Infinite cost makes
+      // `tentative` Infinite, and `Infinity < Infinity` is already false, so
+      // the relaxation below would reject the edge anyway.
       if (!Number.isFinite(cost)) continue; // hard-avoided
 
       const tentative = gScore[current] + cost;
