@@ -39,3 +39,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Cached raw Overpass response (regenerate with scripts/fetchSfBikeGraph.mjs --refresh)
+node_modules/.cache/
