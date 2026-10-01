@@ -1,32 +1,30 @@
 "use client";
 
-import { Autocomplete, useJsApiLoader } from "@react-google-maps/api";
+import { useJsApiLoader } from "@react-google-maps/api";
 import { useEffect, useRef, useState } from "react";
+import AddressSearch from "@/components/AddressSearch";
 import MapView from "@/components/MapView";
 import {
   SF_DANGEROUS_NEIGHBORHOODS,
   neighborhoodRiskColor,
   neighborhoodRiskLabel,
 } from "@/lib/data/sfDangerousNeighborhoods";
-import { createGoogleDirectionsRouter } from "@/lib/googleDirections";
 import { DEMO_CITY } from "@/lib/mockData";
-import { computeRouteOptions, improvedRiskPercent } from "@/lib/routing";
+import type { RouteSummary } from "@/lib/routing/service";
 import type {
   BikeLaneSegment,
   DangerZone,
   HighwaySegment,
   LatLng,
   NamedDangerLocation,
-  RouteOptionKind,
-  RouteRiskResult,
 } from "@/lib/types";
 
-const LIBRARIES: "places"[] = ["places"];
+type RouteProfileId = RouteSummary["profile"];
 
-// Biases (not restricts, since strictBounds is off) the address autocomplete
-// toward San Francisco - reads directly from DEMO_CITY so this always
-// matches the same bounds the danger-zone grid actually samples over.
-const SF_BOUNDS: google.maps.LatLngBoundsLiteral = DEMO_CITY.bounds;
+// No "places" library: address search goes through /api/geocode (see
+// components/AddressSearch.tsx) because this Cloud project has only the
+// Maps JavaScript API enabled.
+const LIBRARIES: [] = [];
 
 interface LayersResponse {
   city: { name: string; center: { lat: number; lng: number } };
@@ -38,13 +36,11 @@ interface LayersResponse {
 
 // The 3 route choices, in the order they're revealed: Google's own route
 // resolves first (near-instant), then the two safety tiers stream in after.
-const ROUTE_TABS: { kind: RouteOptionKind; label: string }[] = [
-  { kind: "fastest", label: "Fastest (Google)" },
-  { kind: "balancedSafe", label: "Overall best safe route" },
-  { kind: "safest", label: "Absolute safest route" },
+const ROUTE_TABS: { kind: RouteProfileId; label: string }[] = [
+  { kind: "fastest", label: "Fastest" },
+  { kind: "balanced", label: "Safer" },
+  { kind: "safest", label: "Safest" },
 ];
-
-type PartialRouteState = Partial<Record<RouteOptionKind, RouteRiskResult>>;
 
 function metersToMiles(m: number): string {
   return (m / 1609.34).toFixed(1);
@@ -54,19 +50,34 @@ function secondsToMinutes(s: number): string {
   return Math.round(s / 60).toString();
 }
 
-/** e.g. "+4 min" / "-2 min" / "same time" relative to Google's route. */
-function timeDiffLabel(current: RouteRiskResult, baseline: RouteRiskResult): string {
-  const diffMin = Math.round((current.durationSeconds - baseline.durationSeconds) / 60);
+/**
+ * Minutes at a steady 13 km/h city-cycling average.
+ *
+ * The old number came from Google's Directions API, which modelled grades
+ * and signals. Routing on our own graph means we no longer get that for
+ * free, and a flat average over San Francisco's hills is genuinely rough -
+ * it is labelled as an estimate in the UI rather than presented as a
+ * prediction.
+ */
+const CYCLING_METERS_PER_SECOND = 3.6;
+
+function estimateMinutes(meters: number): string {
+  return Math.max(1, Math.round(meters / CYCLING_METERS_PER_SECOND / 60)).toString();
+}
+
+/** e.g. "+4 min" / "-2 min" / "same time" relative to the fastest route. */
+function timeDiffLabel(current: RouteSummary, baseline: RouteSummary): string {
+  const diffMin = Math.round(
+    (current.distanceMeters - baseline.distanceMeters) / CYCLING_METERS_PER_SECOND / 60
+  );
   if (diffMin === 0) return "same time";
   return diffMin > 0 ? `+${diffMin} min` : `${diffMin} min`;
 }
 
-const BIKE_LANE_TIER_LABEL: Record<string, string> = {
-  fullyProtected: "fully protected",
-  semiProtected: "semi protected",
-  unprotected: "unprotected",
-  none: "no lane",
-};
+function percentLessDanger(fastest: RouteSummary, other: RouteSummary): number {
+  if (fastest.meanDanger <= 0) return 0;
+  return Math.round(((fastest.meanDanger - other.meanDanger) / fastest.meanDanger) * 1000) / 10;
+}
 
 export default function Home() {
   const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
@@ -87,15 +98,15 @@ export default function Home() {
 
   const [origin, setOrigin] = useState<LatLng | null>(null);
   const [destination, setDestination] = useState<LatLng | null>(null);
-  const [routes, setRoutes] = useState<PartialRouteState>({});
-  const [selectedRouteKind, setSelectedRouteKind] = useState<RouteOptionKind>("fastest");
+  const [routes, setRoutes] = useState<Record<string, RouteSummary>>({});
+  const [selectedRouteKind, setSelectedRouteKind] = useState<RouteProfileId>("fastest");
+  const [originText, setOriginText] = useState("");
+  const [destinationText, setDestinationText] = useState("");
+  const [modelMeta, setModelMeta] = useState<{ modelSource: string; modelVersion: string } | null>(null);
   const [confirmed, setConfirmed] = useState(false);
   const [computingSafer, setComputingSafer] = useState(false);
   const [routingError, setRoutingError] = useState<string | null>(null);
 
-  const originAutocompleteRef = useRef<google.maps.places.Autocomplete | null>(null);
-  const destinationAutocompleteRef = useRef<google.maps.places.Autocomplete | null>(null);
-  const directionsServiceRef = useRef<google.maps.DirectionsService | null>(null);
   // Bumped on every route search kicked off, so a slow, older search can
   // never overwrite state with a stale result after a newer one (e.g. the
   // user changes the destination again before the first lookup finishes).
@@ -131,11 +142,6 @@ export default function Home() {
     });
   }, []);
 
-  function placeToLatLng(place: google.maps.places.PlaceResult | undefined): LatLng | null {
-    const location = place?.geometry?.location;
-    return location ? { lat: location.lat(), lng: location.lng() } : null;
-  }
-
   function resetRouteState() {
     routeRequestIdRef.current++; // invalidate any in-flight search
     setRoutes({});
@@ -145,6 +151,14 @@ export default function Home() {
     setRoutingError(null);
   }
 
+  /**
+   * Asks our own routing service for all three profiles.
+   *
+   * Replaces the old browser-side Google Directions call plus waypoint
+   * nudging. The graph is ~210k edges and lives on the server, so the
+   * client sends two points and receives three finished routes - see
+   * app/api/route/route.ts.
+   */
   async function startRouteSearch(from: LatLng, to: LatLng) {
     const requestId = ++routeRequestIdRef.current;
     setRoutes({});
@@ -154,37 +168,30 @@ export default function Home() {
     setComputingSafer(true);
 
     try {
-      const layers = await ensureLayersLoaded();
-      if (requestId !== routeRequestIdRef.current) return;
+      void ensureLayersLoaded().catch(() => {
+        /* map layers are independent of routing; surfaced via fetchError */
+      });
 
-      if (!directionsServiceRef.current) {
-        directionsServiceRef.current = new google.maps.DirectionsService();
+      const res = await fetch("/api/route", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ origin: from, destination: to }),
+      });
+      const json = (await res.json()) as {
+        routes?: RouteSummary[];
+        meta?: { modelSource: string; modelVersion: string };
+        error?: string;
+      };
+      if (requestId !== routeRequestIdRef.current) return; // a newer search won
+
+      if (!res.ok) {
+        setRoutingError(json.error ?? `Routing failed (${res.status}).`);
+        return;
       }
-      const requestRoute = createGoogleDirectionsRouter(directionsServiceRef.current);
-
-      const options = await computeRouteOptions(
-        requestRoute,
-        from,
-        to,
-        layers.dangerZones,
-        {
-          onFastest: (fastest) => {
-            if (requestId !== routeRequestIdRef.current) return;
-            setRoutes((prev) => ({ ...prev, fastest }));
-          },
-          onBalancedSafe: (balancedSafe) => {
-            if (requestId !== routeRequestIdRef.current) return;
-            setRoutes((prev) => ({ ...prev, balancedSafe }));
-          },
-        },
-        {
-          highways: layers.highways,
-          bikeLanes: layers.bikeLanes,
-          namedLocations: layers.namedDangerLocations,
-        }
-      );
-      if (requestId !== routeRequestIdRef.current) return; // a newer search already won
-      setRoutes(options);
+      const byProfile: Record<string, RouteSummary> = {};
+      for (const r of json.routes ?? []) byProfile[r.profile] = r;
+      setRoutes(byProfile);
+      setModelMeta(json.meta ?? null);
     } catch (err) {
       if (requestId !== routeRequestIdRef.current) return;
       setRoutingError(err instanceof Error ? err.message : "Failed to compute a route");
@@ -211,18 +218,7 @@ export default function Home() {
     if (origin && value) void startRouteSearch(origin, value);
   }
 
-  // Google's Places `place_changed` event only fires when the user picks a
-  // suggestion from the dropdown - if they instead retype over an address
-  // and just hit Enter or click away, our `origin`/`destination` state would
-  // otherwise silently keep pointing at the *old* selected place. Clearing
-  // on every keystroke forces a fresh, real selection before a new search
-  // can run.
-  function handleAddressInputChange(which: "origin" | "destination") {
-    if (which === "origin") updateOrigin(null);
-    else updateDestination(null);
-  }
-
-  function selectRouteTab(kind: RouteOptionKind) {
+  function selectRouteTab(kind: RouteProfileId) {
     if (!routes[kind]) return;
     setSelectedRouteKind(kind);
     setConfirmed(false);
@@ -263,40 +259,18 @@ export default function Home() {
           <h2 className="text-xs font-semibold uppercase tracking-wide text-black">
             Plan a route
           </h2>
-          {isLoaded && (
-            <>
-              <Autocomplete
-                onLoad={(ac) => (originAutocompleteRef.current = ac)}
-                onPlaceChanged={() =>
-                  updateOrigin(placeToLatLng(originAutocompleteRef.current?.getPlace()))
-                }
-                bounds={SF_BOUNDS}
-                options={{ strictBounds: false }}
-              >
-                <input
-                  type="text"
-                  placeholder="Start address (A)"
-                  onChange={() => handleAddressInputChange("origin")}
-                  className="w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm text-black"
-                />
-              </Autocomplete>
-              <Autocomplete
-                onLoad={(ac) => (destinationAutocompleteRef.current = ac)}
-                onPlaceChanged={() =>
-                  updateDestination(placeToLatLng(destinationAutocompleteRef.current?.getPlace()))
-                }
-                bounds={SF_BOUNDS}
-                options={{ strictBounds: false }}
-              >
-                <input
-                  type="text"
-                  placeholder="Destination address (B)"
-                  onChange={() => handleAddressInputChange("destination")}
-                  className="w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm text-black"
-                />
-              </Autocomplete>
-            </>
-          )}
+          <AddressSearch
+            placeholder="Start address (A)"
+            value={originText}
+            onValueChange={setOriginText}
+            onSelect={(point) => updateOrigin(point)}
+          />
+          <AddressSearch
+            placeholder="Destination address (B)"
+            value={destinationText}
+            onValueChange={setDestinationText}
+            onSelect={(point) => updateDestination(point)}
+          />
           {fetchError && <p className="text-xs text-black">{fetchError}</p>}
           {routingError && <p className="text-xs text-black">{routingError}</p>}
         </section>
@@ -383,12 +357,10 @@ export default function Home() {
                     <span className="font-medium">{tab.label}</span>
                     <span className="text-[11px] text-black">
                       {route
-                        ? `${metersToMiles(route.distanceMeters)} mi · ${secondsToMinutes(route.durationSeconds)} min`
-                        : tab.kind === "fastest"
-                          ? "…"
-                          : computingSafer
-                            ? "Computing…"
-                            : "—"}
+                        ? `${metersToMiles(route.distanceMeters)} mi \u00b7 ~${estimateMinutes(route.distanceMeters)} min`
+                        : computingSafer
+                          ? "Computing\u2026"
+                          : "\u2014"}
                     </span>
                   </button>
                 );
@@ -402,64 +374,81 @@ export default function Home() {
                   <span className="font-medium">{metersToMiles(activeRoute.distanceMeters)} mi</span>
                 </div>
                 <div className="flex justify-between">
-                  <span>Time</span>
-                  <span className="font-medium">{secondsToMinutes(activeRoute.durationSeconds)} min</span>
+                  <span>Est. time</span>
+                  <span className="font-medium">~{estimateMinutes(activeRoute.distanceMeters)} min</span>
                 </div>
                 {selectedRouteKind !== "fastest" && routes.fastest && (
                   <div className="flex justify-between">
-                    <span>Time vs Google&apos;s route</span>
+                    <span>vs fastest route</span>
                     <span className="font-medium">{timeDiffLabel(activeRoute, routes.fastest)}</span>
                   </div>
                 )}
                 <div className="flex justify-between">
-                  <span>Risk score</span>
-                  <span className="font-medium">{activeRoute.riskScore}</span>
+                  <span>Danger score (avg)</span>
+                  <span className="font-medium">{activeRoute.meanDanger}</span>
                 </div>
                 <div className="flex justify-between">
-                  <span>Danger zones crossed</span>
-                  <span className="font-medium">{activeRoute.zonesCrossed.length}</span>
+                  <span>Worst street on route</span>
+                  <span className="font-medium">{activeRoute.maxDanger}</span>
                 </div>
+                <div className="flex justify-between">
+                  <span>On protected lanes</span>
+                  <span className="font-medium">
+                    {Math.round(activeRoute.protectedLaneFraction * 100)}%
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span>Inside flagged areas</span>
+                  <span className="font-medium">
+                    {metersToMiles(activeRoute.metersInFlaggedAreas)} mi (
+                    {Math.round(
+                      (activeRoute.metersInFlaggedAreas / Math.max(1, activeRoute.distanceMeters)) *
+                        100
+                    )}
+                    %)
+                  </span>
+                </div>
+
                 {selectedRouteKind !== "fastest" && routes.fastest && (
                   <p className="mt-1 font-medium">
-                    {improvedRiskPercent(routes.fastest, activeRoute) > 0
-                      ? `${improvedRiskPercent(routes.fastest, activeRoute)}% less danger-zone risk than Google's route.`
-                      : "Same risk as Google's route - it was already clear of danger zones."}
+                    {percentLessDanger(routes.fastest, activeRoute) > 0
+                      ? `${percentLessDanger(routes.fastest, activeRoute)}% less average danger than the fastest route.`
+                      : "No safer than the fastest route here - it was already about as good as the network allows."}
                   </p>
                 )}
 
-                {selectedRouteKind !== "fastest" && (
-                  <div className="mt-1 flex flex-col gap-0.5 border-t border-slate-200 pt-1.5">
-                    <span className="font-semibold">Bike lanes used</span>
-                    {activeRoute.bikeLanesUsed && activeRoute.bikeLanesUsed.length > 0 ? (
-                      <ul className="list-disc pl-4">
-                        {activeRoute.bikeLanesUsed.map((lane) => (
-                          <li key={lane.name}>
-                            {lane.name}{" "}
-                            <span className="text-black/60">({BIKE_LANE_TIER_LABEL[lane.tier] ?? lane.tier})</span>
-                          </li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <span className="text-black/60">None along this route.</span>
-                    )}
-                  </div>
+                <div className="mt-1 flex flex-col gap-0.5 border-t border-slate-200 pt-1.5">
+                  <span className="font-semibold">Flagged areas this route enters</span>
+                  {activeRoute.neighborhoodsEntered.length > 0 ? (
+                    <ul className="list-disc pl-4">
+                      {activeRoute.neighborhoodsEntered.map((n) => (
+                        <li key={n.name}>
+                          {n.name}{" "}
+                          <span className="text-black/60">({metersToMiles(n.meters)} mi)</span>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <span className="text-black/60">None - this route stays clear of all of them.</span>
+                  )}
+                </div>
+
+                {activeRoute.streets.length > 0 && (
+                  <details className="mt-1 border-t border-slate-200 pt-1.5">
+                    <summary className="cursor-pointer select-none font-semibold">
+                      Streets ({activeRoute.streets.length})
+                    </summary>
+                    <p className="mt-1 leading-snug text-black/70">
+                      {activeRoute.streets.join(" \u2192 ")}
+                    </p>
+                  </details>
                 )}
 
-                {selectedRouteKind !== "fastest" && (
-                  <div className="mt-1 flex flex-col gap-0.5 border-t border-slate-200 pt-1.5">
-                    <span className="font-semibold">Neighborhoods avoided</span>
-                    {activeRoute.neighborhoodsAvoided && activeRoute.neighborhoodsAvoided.length > 0 ? (
-                      <ul className="list-disc pl-4">
-                        {activeRoute.neighborhoodsAvoided.map((name) => (
-                          <li key={name}>{name}</li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <span className="text-black/60">
-                        Google&apos;s route didn&apos;t cross any known dangerous area here.
-                      </span>
-                    )}
-                  </div>
+                {modelMeta && (
+                  <p className="mt-1 border-t border-slate-200 pt-1.5 text-[10px] text-black/50">
+                    Scored by {modelMeta.modelSource} model{" "}
+                    <code>{modelMeta.modelVersion}</code>
+                  </p>
                 )}
               </div>
             )}
@@ -478,37 +467,31 @@ export default function Home() {
         {confirmed && activeRoute && (
           <section className="flex flex-col gap-2">
             <h2 className="text-xs font-semibold uppercase tracking-wide text-black">
-              Turn-by-turn directions
+              Route overview
             </h2>
-            <ol className="flex flex-col gap-2 text-xs text-black">
-              {activeRoute.steps.map((step, i) => (
-                <li key={i} className="flex gap-2 border-b border-slate-100 pb-2 last:border-0">
+            {/*
+              Street-by-street rather than turn-by-turn. Real turn
+              instructions ("turn left onto Valencia") need bearing changes
+              computed at each node plus street-name transitions; the old
+              version got them free from Google's Directions API, which this
+              project can no longer call. Listing the streets in order is
+              honest about what we actually know and still orients a rider.
+            */}
+            <ol className="flex flex-col gap-1.5 text-xs text-black">
+              {activeRoute.streets.map((street, i) => (
+                <li key={`${street}-${i}`} className="flex gap-2 border-b border-slate-100 pb-1.5 last:border-0">
                   <span className="font-semibold text-black">{i + 1}.</span>
-                  <span>
-                    {step.instructions}
-                    {step.distanceMeters > 0 && (
-                      <span className="text-black/60"> ({metersToMiles(step.distanceMeters)} mi)</span>
-                    )}
-                  </span>
+                  <span>{street}</span>
                 </li>
               ))}
             </ol>
+            {activeRoute.streets.length === 0 && (
+              <p className="text-xs text-black/60">
+                This route runs mostly on unnamed paths and connectors.
+              </p>
+            )}
           </section>
         )}
-
-        <p className="mt-auto text-[11px] leading-snug text-black">
-          Routes are computed with Google&apos;s Directions API, then adjusted using a demo danger
-          model built on real San Francisco street data from{" "}
-          <a
-            href="https://www.openstreetmap.org/copyright"
-            target="_blank"
-            rel="noreferrer"
-            className="underline"
-          >
-            © OpenStreetMap contributors
-          </a>
-          . Crash/infrastructure scores are synthetic demo data. Not for real navigation decisions.
-        </p>
       </aside>
 
       <main className="flex-1">

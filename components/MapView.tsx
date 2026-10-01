@@ -17,7 +17,8 @@ import type {
 } from "@/lib/types";
 
 export interface SelectedRouteDisplay {
-  kind: RouteOptionKind;
+  /** Matches `RouteSummary["profile"]` from lib/routing/service.ts. */
+  kind: "fastest" | "balanced" | "safest";
   path: LatLng[];
 }
 
@@ -93,12 +94,12 @@ const ROAD_WIDTH_BY_KIND: Record<RoadKind, number> = {
   bikeLane: 4,
 };
 
-// Fastest (Google's own route) stays a neutral gray - it's the baseline,
-// not a recommendation. Overall-best is amber (a reasonable middle ground),
-// absolute-safest is green (safety above all else).
-const ROUTE_COLOR_BY_KIND: Record<RouteOptionKind, string> = {
+// Fastest stays a neutral gray - it's the baseline we compare against, not
+// a recommendation. Safer is amber (a reasonable middle ground), safest is
+// green (safety above all else).
+const ROUTE_COLOR_BY_KIND: Record<SelectedRouteDisplay["kind"], string> = {
   fastest: "#64748b",
-  balancedSafe: "#f59e0b",
+  balanced: "#f59e0b",
   safest: "#16a34a",
 };
 
