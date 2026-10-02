@@ -166,6 +166,44 @@ export interface RouteSummary {
   neighborhoodsEntered: { name: string; meters: number }[];
   /** Total distance ridden inside any flagged neighbourhood. */
   metersInFlaggedAreas: number;
+  /**
+   * Stretches of protected cycling infrastructure, positioned along the
+   * route, so the tour can call them out as it reaches them.
+   *
+   * Only fully/semi-protected tiers: painted lanes and sharrows are not
+   * an achievement worth announcing, and labelling them as one would make
+   * the callouts meaningless.
+   */
+  protectedSpans: {
+    tier: "fullyProtected" | "semiProtected";
+    name: string | null;
+    startMeters: number;
+    endMeters: number;
+  }[];
+  /**
+   * Flagged neighbourhoods the route passes close to but never enters,
+   * with where along the route the closest approach happens.
+   *
+   * This is the positive claim the app exists to make - "we took you
+   * round that" - and it can only be made about areas the route genuinely
+   * came near. An area on the far side of the city was not avoided in any
+   * meaningful sense, so `NEAR_MISS_RADIUS_METERS` bounds it.
+   */
+  avoidedNearby: { name: string; atMeters: number; closestMeters: number }[];
+}
+
+/**
+ * How close a route must pass to a flagged area for skirting it to count
+ * as avoidance worth reporting. Beyond this the area simply was not on
+ * the way.
+ */
+const NEAR_MISS_RADIUS_METERS = 900;
+
+/** Planar metres between two points - fine at city scale. */
+function distanceMeters(a: LatLng, b: LatLng): number {
+  const dLat = (a.lat - b.lat) * 111_320;
+  const dLng = (a.lng - b.lng) * 111_320 * Math.cos((a.lat * Math.PI) / 180);
+  return Math.sqrt(dLat * dLat + dLng * dLng);
 }
 
 /** Which flagged areas contain this point. */
@@ -196,6 +234,9 @@ function summarize(
   const streets: string[] = [];
   const streetSpans: { name: string; startMeters: number; endMeters: number }[] = [];
   const perArea = new Map<string, number>();
+  const entered = new Set<string>();
+  const closest = new Map<string, { closestMeters: number; atMeters: number }>();
+  const protectedSpans: RouteSummary["protectedSpans"] = [];
   let metersInFlaggedAreas = 0;
   let travelled = 0;
 
@@ -233,6 +274,34 @@ function summarize(
     if (inside.length > 0) metersInFlaggedAreas += e.lengthMeters;
     for (const area of inside) {
       perArea.set(area.name, (perArea.get(area.name) ?? 0) + e.lengthMeters);
+      entered.add(area.name);
+    }
+
+    // Closest approach to every flagged area, and where along the route it
+    // happens - the basis for "avoided X" callouts below.
+    for (const area of SF_DANGEROUS_NEIGHBORHOODS) {
+      const d = Math.max(0, distanceMeters(mid, area.center) - area.radiusMeters);
+      const prev = closest.get(area.name);
+      if (!prev || d < prev.closestMeters) {
+        closest.set(area.name, { closestMeters: d, atMeters: travelled + e.lengthMeters / 2 });
+      }
+    }
+
+    if (e.tier === "fullyProtected" || e.tier === "semiProtected") {
+      const last = protectedSpans[protectedSpans.length - 1];
+      // Merge consecutive protected edges of the same tier so one lane
+      // reads as one callout rather than dozens of OSM fragments.
+      if (last && last.tier === e.tier && Math.abs(last.endMeters - travelled) < 1) {
+        last.endMeters = travelled + e.lengthMeters;
+        if (!last.name && e.name) last.name = e.name;
+      } else {
+        protectedSpans.push({
+          tier: e.tier,
+          name: e.name,
+          startMeters: travelled,
+          endMeters: travelled + e.lengthMeters,
+        });
+      }
     }
   }
 
@@ -258,6 +327,24 @@ function summarize(
       .map(([name, meters]) => ({ name, meters: Math.round(meters) }))
       .sort((x, y) => y.meters - x.meters),
     metersInFlaggedAreas: Math.round(metersInFlaggedAreas),
+    // Short slivers are OSM fragmentation, not a protected lane you would
+    // notice riding; announcing them would bury the real ones.
+    protectedSpans: protectedSpans
+      .filter((sp) => sp.endMeters - sp.startMeters >= 60)
+      .map((sp) => ({
+        tier: sp.tier,
+        name: sp.name,
+        startMeters: Math.round(sp.startMeters),
+        endMeters: Math.round(sp.endMeters),
+      })),
+    avoidedNearby: [...closest.entries()]
+      .filter(([name, c]) => !entered.has(name) && c.closestMeters <= NEAR_MISS_RADIUS_METERS)
+      .map(([name, c]) => ({
+        name,
+        atMeters: Math.round(c.atMeters),
+        closestMeters: Math.round(c.closestMeters),
+      }))
+      .sort((a, b) => a.atMeters - b.atMeters),
   };
 }
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Map as MlMap, setWorkerUrl, type GeoJSONSource } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import {
@@ -23,6 +23,12 @@ import {
   neighborhoodRiskColor,
 } from "@/lib/data/sfDangerousNeighborhoods";
 import { currentStreetAt } from "@/lib/tour/currentStreet";
+import {
+  activeAnnotation,
+  buildAnnotations,
+  type AvoidedArea,
+  type ProtectedSpan,
+} from "@/lib/tour/annotations";
 import type { StreetSpan } from "@/lib/tour/currentStreet";
 import type { LatLng } from "@/lib/types";
 
@@ -57,6 +63,8 @@ interface Props {
   path: LatLng[];
   profile: string;
   streetSpans?: StreetSpan[];
+  protectedSpans?: ProtectedSpan[];
+  avoidedNearby?: AvoidedArea[];
   onClose: () => void;
 }
 
@@ -78,7 +86,14 @@ function tourDurationSeconds(totalMeters: number): number {
 const FLY_ZOOM = 17;
 const FLY_PITCH = 66;
 
-export default function Route3DTour({ path, profile, streetSpans = [], onClose }: Props) {
+export default function Route3DTour({
+  path,
+  profile,
+  streetSpans = [],
+  protectedSpans = [],
+  avoidedNearby = [],
+  onClose,
+}: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MlMap | null>(null);
   const framesRef = useRef<CameraKeyframe[]>([]);
@@ -101,6 +116,11 @@ export default function Route3DTour({ path, profile, streetSpans = [], onClose }
 
   const metersDone = totalMeters * progress;
   const currentStreet = currentStreetAt(streetSpans, metersDone);
+  const annotations = useMemo(
+    () => buildAnnotations(protectedSpans, avoidedNearby),
+    [protectedSpans, avoidedNearby]
+  );
+  const callout = activeAnnotation(annotations, metersDone);
 
   const applyCamera = useCallback((t: number) => {
     const map = mapRef.current;
@@ -485,6 +505,26 @@ export default function Route3DTour({ path, profile, streetSpans = [], onClose }
         removed.
       */}
       <style jsx global>{`
+        /* Each callout animates in once; keyed on the event so a new one
+           replays rather than silently swapping text in place. */
+        .tour-callout {
+          animation: tourCalloutIn 320ms cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        @keyframes tourCalloutIn {
+          from {
+            opacity: 0;
+            transform: translateY(-6px) scale(0.96);
+          }
+          to {
+            opacity: 1;
+            transform: none;
+          }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .tour-callout {
+            animation: none;
+          }
+        }
         .tour-map .maplibregl-ctrl-attrib {
           background: rgba(2, 6, 23, 0.55);
           color: rgba(226, 232, 240, 0.75);
@@ -520,6 +560,32 @@ export default function Route3DTour({ path, profile, streetSpans = [], onClose }
         {currentStreet && (
           <span className="w-fit max-w-[22rem] truncate rounded-md bg-slate-950/70 px-2.5 py-1.5 text-sm font-medium text-white shadow-lg backdrop-blur">
             {currentStreet}
+          </span>
+        )}
+
+        {/*
+          The two claims the app exists to make, said out loud at the
+          moment they happen rather than left to be inferred from the
+          statistics panel afterwards.
+        */}
+        {callout && (
+          <span
+            key={`${callout.kind}-${callout.atMeters}`}
+            className={`tour-callout mt-1 flex w-fit max-w-[24rem] items-center gap-2 rounded-lg px-3 py-2 shadow-xl backdrop-blur ${
+              callout.kind === "protected"
+                ? "bg-emerald-500/90 text-emerald-950"
+                : "bg-amber-400/90 text-amber-950"
+            }`}
+          >
+            <span aria-hidden className="text-base leading-none">
+              {callout.kind === "protected" ? "\u{1F6E1}" : "\u{21AA}"}
+            </span>
+            <span className="flex flex-col leading-tight">
+              <span className="text-[10px] font-bold uppercase tracking-wide opacity-80">
+                {callout.title}
+              </span>
+              <span className="truncate text-sm font-semibold">{callout.detail}</span>
+            </span>
           </span>
         )}
       </div>

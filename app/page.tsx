@@ -523,6 +523,8 @@ export default function Home() {
             path={activeRoute.path}
             profile={activeRoute.profile}
             streetSpans={activeRoute.streetSpans}
+            protectedSpans={activeRoute.protectedSpans}
+            avoidedNearby={activeRoute.avoidedNearby}
             onClose={() => setTourOpen(false)}
           />
         )}
