@@ -9,19 +9,14 @@ import {
   sampleCameraPath,
   type CameraKeyframe,
 } from "@/lib/tour/camera";
+import { mapStyleUrl, satelliteStyle, type TourStyleMode } from "@/lib/tour/style";
 import {
-  TERRAIN_EXAGGERATION,
-  TERRAIN_SOURCE_ID,
-  TOUR_FONT,
-  mapStyleUrl,
-  satelliteStyle,
-  terrainSourceSpec,
-  type TourStyleMode,
-} from "@/lib/tour/style";
-import {
-  SF_DANGEROUS_NEIGHBORHOODS,
-  neighborhoodRiskColor,
-} from "@/lib/data/sfDangerousNeighborhoods";
+  FLY_PITCH,
+  FLY_ZOOM,
+  ROUTE_COLOR,
+  addTourLayers,
+  applyRealBuildings,
+} from "@/lib/tour/layers";
 import { currentStreetAt } from "@/lib/tour/currentStreet";
 import { fetchCorridorBuildings } from "@/lib/tour/buildings";
 import { makeCarIcon, makeCyclistIcon } from "@/lib/tour/icons";
@@ -56,12 +51,6 @@ import type { LatLng } from "@/lib/types";
  * project's key) and what genuinely-real imagery we use instead.
  */
 
-const ROUTE_COLOR: Record<string, string> = {
-  fastest: "#94a3b8",
-  balanced: "#fbbf24",
-  safest: "#22c55e",
-};
-
 const PROFILE_LABEL: Record<string, string> = {
   fastest: "Fastest",
   balanced: "Safer",
@@ -92,18 +81,6 @@ function tourDurationSeconds(totalMeters: number): number {
   return Math.min(TOUR_MAX_SECONDS, Math.max(TOUR_MIN_SECONDS, scaled));
 }
 
-/**
- * Camera framing.
- *
- * Pulled back from the original 17/66. At street level in the Financial
- * District the towers are 150-200m and the camera ends up among them,
- * with the route, the rider and the traffic all hidden behind a wall of
- * building. A slightly higher, slightly shallower camera clears most
- * massing while still reading as a street-level fly-through in the
- * low-rise districts that make up most of the city.
- */
-const FLY_ZOOM = 16.4;
-const FLY_PITCH = 58;
 
 export default function Route3DTour({
   path,
@@ -143,6 +120,7 @@ export default function Route3DTour({
   const trafficRef = useRef<TrafficVehicle[]>([]);
   const cumRef = useRef<number[]>([]);
   const elapsedRef = useRef(0);
+  const buildingsRef = useRef<Awaited<ReturnType<typeof fetchCorridorBuildings>> | null>(null);
 
   const metersDone = totalMeters * progress;
   const currentStreet = currentStreetAt(streetSpans, metersDone);
@@ -187,152 +165,9 @@ export default function Route3DTour({
   }, []);
 
   /** Rebuilt after a style switch, since `setStyle` discards everything we added. */
+  /** Rebuilt after a style switch, since `setStyle` discards everything we added. */
   const addOverlays = useCallback(
     (map: MlMap) => {
-      if (!map.getSource(TERRAIN_SOURCE_ID)) {
-        map.addSource(TERRAIN_SOURCE_ID, terrainSourceSpec());
-      }
-      map.setTerrain({ source: TERRAIN_SOURCE_ID, exaggeration: TERRAIN_EXAGGERATION });
-
-      if (!map.getSource("danger-areas")) {
-        map.addSource("danger-areas", {
-          type: "geojson",
-          data: {
-            type: "FeatureCollection",
-            features: SF_DANGEROUS_NEIGHBORHOODS.map((a) => ({
-              type: "Feature" as const,
-              geometry: {
-                type: "Polygon" as const,
-                coordinates: [circlePolygon(a.center, a.radiusMeters)],
-              },
-              properties: { name: a.name, color: neighborhoodRiskColor(a.risk), risk: a.risk },
-            })),
-          },
-        });
-      }
-      if (!map.getLayer("danger-fill")) {
-        map.addLayer({
-          id: "danger-fill",
-          type: "fill-extrusion",
-          source: "danger-areas",
-          paint: {
-            "fill-extrusion-color": ["get", "color"],
-            // Low slab, not a tall volume: tall translucent boxes over
-            // photography wash out the streets the tour exists to show.
-            "fill-extrusion-height": 18,
-            "fill-extrusion-opacity": 0.26,
-          },
-        });
-      }
-
-      if (!map.getSource("route")) {
-        map.addSource("route", {
-          type: "geojson",
-          data: {
-            type: "Feature",
-            geometry: { type: "LineString", coordinates: path.map((p) => [p.lng, p.lat]) },
-            properties: {},
-          },
-        });
-      }
-      if (!map.getLayer("route-glow")) {
-        // Three stacked lines: soft glow, dark casing, then the route.
-        // A single stroke disappears against both pale concrete and dark
-        // shadow in aerial imagery.
-        map.addLayer({
-          id: "route-glow",
-          type: "line",
-          source: "route",
-          layout: { "line-cap": "round", "line-join": "round" },
-          paint: {
-            "line-color": ROUTE_COLOR[profile] ?? "#38bdf8",
-            "line-width": 22,
-            "line-blur": 15,
-            "line-opacity": 0.5,
-          },
-        });
-        map.addLayer({
-          id: "route-casing",
-          type: "line",
-          source: "route",
-          layout: { "line-cap": "round", "line-join": "round" },
-          paint: { "line-color": "#0f172a", "line-width": 11, "line-opacity": 0.9 },
-        });
-        map.addLayer({
-          id: "route-line",
-          type: "line",
-          source: "route",
-          layout: { "line-cap": "round", "line-join": "round" },
-          paint: { "line-color": ROUTE_COLOR[profile] ?? "#38bdf8", "line-width": 6 },
-        });
-      }
-
-      if (!map.getSource("endpoints")) {
-        map.addSource("endpoints", {
-          type: "geojson",
-          data: {
-            type: "FeatureCollection",
-            features: [
-              {
-                type: "Feature",
-                geometry: { type: "Point", coordinates: [path[0].lng, path[0].lat] },
-                properties: { label: "A" },
-              },
-              {
-                type: "Feature",
-                geometry: {
-                  type: "Point",
-                  coordinates: [path[path.length - 1].lng, path[path.length - 1].lat],
-                },
-                properties: { label: "B" },
-              },
-            ],
-          },
-        });
-      }
-      if (!map.getLayer("endpoint-dots")) {
-        map.addLayer({
-          id: "endpoint-dots",
-          type: "circle",
-          source: "endpoints",
-          paint: {
-            "circle-radius": 9,
-            "circle-color": "#0f172a",
-            "circle-stroke-width": 3,
-            "circle-stroke-color": "#ffffff",
-          },
-        });
-        map.addLayer({
-          id: "endpoint-labels",
-          type: "symbol",
-          source: "endpoints",
-          layout: {
-            "text-field": ["get", "label"],
-            "text-font": TOUR_FONT,
-            "text-size": 11,
-            "text-offset": [0, 0.1],
-          },
-          paint: { "text-color": "#ffffff" },
-        });
-      }
-
-      if (!map.getSource("tour-position")) {
-        map.addSource("tour-position", {
-          type: "geojson",
-          data: {
-            type: "Feature",
-            geometry: { type: "Point", coordinates: [path[0].lng, path[0].lat] },
-            properties: {},
-          },
-        });
-      }
-      // Traffic sits UNDER the rider so the rider is never hidden by a car.
-      if (!map.getSource("traffic")) {
-        map.addSource("traffic", {
-          type: "geojson",
-          data: { type: "FeatureCollection", features: [] },
-        });
-      }
       for (const [name, oncoming] of [
         ["car-with", false],
         ["car-oncoming", true],
@@ -342,45 +177,11 @@ export default function Route3DTour({
           if (img) map.addImage(name, img, { pixelRatio: 2 });
         }
       }
-      if (!map.getLayer("traffic-cars")) {
-        map.addLayer({
-          id: "traffic-cars",
-          type: "symbol",
-          source: "traffic",
-          layout: {
-            "icon-image": ["case", ["==", ["get", "oncoming"], 1], "car-oncoming", "car-with"],
-            "icon-rotate": ["get", "bearing"],
-            // Lie flat on the road and turn with the map, rather than
-            // facing the camera like a billboard.
-            "icon-rotation-alignment": "map",
-            "icon-pitch-alignment": "map",
-            "icon-allow-overlap": true,
-            "icon-ignore-placement": true,
-            "icon-size": ["interpolate", ["linear"], ["zoom"], 14, 0.35, 17, 0.8, 19, 1.1],
-          },
-        });
-      }
-
       if (!map.hasImage("cyclist")) {
         const img = makeCyclistIcon();
         if (img) map.addImage("cyclist", img, { pixelRatio: 2 });
       }
-      if (!map.getLayer("tour-dot")) {
-        map.addLayer({
-          id: "tour-dot",
-          type: "symbol",
-          source: "tour-position",
-          layout: {
-            "icon-image": "cyclist",
-            "icon-rotate": ["get", "bearing"],
-            "icon-rotation-alignment": "map",
-            "icon-pitch-alignment": "map",
-            "icon-allow-overlap": true,
-            "icon-ignore-placement": true,
-            "icon-size": ["interpolate", ["linear"], ["zoom"], 14, 0.4, 17, 0.75, 19, 1],
-          },
-        });
-      }
+      addTourLayers(map, { path, profile });
     },
     [path, profile]
   );
@@ -454,54 +255,24 @@ export default function Route3DTour({
       // stand and the view is merely less complete.
       void fetchCorridorBuildings(path, abort.signal)
         .then((result) => {
+          buildingsRef.current = result;
           if (abort.signal.aborted || result.count === 0) return;
           const m = mapRef.current;
-          if (!m || !m.isStyleLoaded()) return;
-          if (!m.getSource("sf-buildings")) {
-            m.addSource("sf-buildings", { type: "geojson", data: result.geojson });
-            m.addLayer({
-              id: "sf-buildings-3d",
-              type: "fill-extrusion",
-              source: "sf-buildings",
-              paint: {
-                "fill-extrusion-color": [
-                  "interpolate",
-                  ["linear"],
-                  ["get", "height"],
-                  0,
-                  "#8d93a6",
-                  40,
-                  "#a7adbd",
-                  120,
-                  "#c9cedb",
-                ],
-                "fill-extrusion-height": ["get", "height"],
-                "fill-extrusion-base": 0,
-                // Opaque. At 0.85 every tower in a dense downtown block
-                // stacks its translucent faces on the ones behind, and the
-                // view turns into a milky white wash with no readable
-                // massing at all. Solid surfaces also let the renderer
-                // depth-cull, which is faster.
-                "fill-extrusion-opacity": 1,
-                "fill-extrusion-vertical-gradient": true,
-              },
-            });
-          } else {
-            (m.getSource("sf-buildings") as GeoJSONSource).setData(result.geojson);
-          }
-          // Only hide the tile buildings when LiDAR coverage is complete.
-          // Hiding them under partial coverage leaves holes where whole
-          // neighbourhoods should be - worse than the generalised tiles.
-          if (!result.partial && m.getLayer("buildings-3d")) {
-            m.setLayoutProperty("buildings-3d", "visibility", "none");
-          }
-          // Keep the things the tour is about above the city it is
-          // flying through; fill-extrusion otherwise paints over the
-          // ground-level route, rider and cars.
-          for (const id of ["route-glow", "route-casing", "route-line", "traffic-cars", "tour-dot"]) {
-            if (m.getLayer(id)) m.moveLayer(id);
-          }
-          setRealBuildings(result.count);
+          if (!m) return;
+          // Do NOT gate on isStyleLoaded(). With terrain and several
+          // sources streaming it stays false for a long time and flaps,
+          // so an earlier version fetched 1,458 buildings successfully
+          // and then silently threw them away - the tour kept the
+          // generalised tile buildings and nothing said why. Being inside
+          // the `load` handler already guarantees layers can be added; if
+          // the style is momentarily busy, wait for idle rather than
+          // discard the work.
+          const apply = () => {
+            applyRealBuildings(m, result.geojson, !result.partial);
+            setRealBuildings(result.count);
+          };
+          if (m.isStyleLoaded()) apply();
+          else m.once("idle", apply);
         })
         .catch(() => {
           /* tile buildings remain; nothing to surface */
@@ -559,6 +330,12 @@ export default function Route3DTour({
     map.setStyle(next === "satellite" ? satelliteStyle() : mapStyleUrl());
     map.once("styledata", () => {
       addOverlays(map);
+      // `setStyle` discarded the LiDAR buildings along with everything
+      // else. Without this, switching Satellite -> Map -> Satellite
+      // silently drops back to the generalised tile buildings and the
+      // view stops matching the one before the toggle.
+      const cached = buildingsRef.current;
+      if (cached) applyRealBuildings(map, cached.geojson, !cached.partial);
       applyCamera(progressRef.current);
       setReady(true);
     });
@@ -889,18 +666,3 @@ export default function Route3DTour({
   );
 }
 
-/**
- * Approximates a circle as a polygon ring for `fill-extrusion`, which has
- * no circle primitive. 48 sides is smooth at city zoom without bloating
- * the GeoJSON for 17 areas.
- */
-function circlePolygon(center: LatLng, radiusMeters: number, sides = 48): [number, number][] {
-  const ring: [number, number][] = [];
-  const dLat = radiusMeters / 111_320;
-  const dLng = radiusMeters / (111_320 * Math.cos((center.lat * Math.PI) / 180));
-  for (let i = 0; i <= sides; i++) {
-    const a = (i / sides) * 2 * Math.PI;
-    ring.push([center.lng + dLng * Math.cos(a), center.lat + dLat * Math.sin(a)]);
-  }
-  return ring;
-}

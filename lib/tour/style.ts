@@ -93,6 +93,10 @@ export function satelliteStyle(): StyleSpecification {
         source: "openmaptiles",
         "source-layer": "building",
         minzoom: 14,
+        // Paint intentionally matches the LiDAR building layer exactly
+        // (see buildingPaint in lib/tour/layers.ts). Where coverage is
+        // partial both are drawn, and any difference in opacity or colour
+        // shows up as a visible seam down the middle of a neighbourhood.
         paint: {
           "fill-extrusion-color": [
             "interpolate",
@@ -103,11 +107,12 @@ export function satelliteStyle(): StyleSpecification {
             40,
             "#a7adbd",
             120,
-            "#c6cbd8",
+            "#c9cedb",
           ],
           "fill-extrusion-height": ["coalesce", ["get", "render_height"], 8],
           "fill-extrusion-base": ["coalesce", ["get", "render_min_height"], 0],
-          "fill-extrusion-opacity": 0.82,
+          "fill-extrusion-opacity": 1,
+          "fill-extrusion-vertical-gradient": true,
         },
       },
       {

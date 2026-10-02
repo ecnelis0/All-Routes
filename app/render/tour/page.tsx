@@ -4,12 +4,17 @@ import { useEffect, useRef } from "react";
 import { Map as MlMap, setWorkerUrl, type GeoJSONSource } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { buildCameraPath, sampleCameraPath, type CameraKeyframe } from "@/lib/tour/camera";
+import { satelliteStyle } from "@/lib/tour/style";
+import { FLY_PITCH, FLY_ZOOM, addTourLayers, applyRealBuildings } from "@/lib/tour/layers";
+import { fetchCorridorBuildings } from "@/lib/tour/buildings";
+import { makeCarIcon, makeCyclistIcon } from "@/lib/tour/icons";
 import {
-  TERRAIN_EXAGGERATION,
-  TERRAIN_SOURCE_ID,
-  satelliteStyle,
-  terrainSourceSpec,
-} from "@/lib/tour/style";
+  cumulativeDistances,
+  layOutTraffic,
+  trafficAt,
+  type TrafficRoadClass,
+  type TrafficVehicle,
+} from "@/lib/tour/traffic";
 import type { LatLng } from "@/lib/types";
 
 /**
@@ -30,12 +35,6 @@ import type { LatLng } from "@/lib/types";
  * which makes a render deterministic and reproducible.
  */
 
-const ROUTE_COLOR: Record<string, string> = {
-  fastest: "#94a3b8",
-  balanced: "#fbbf24",
-  safest: "#22c55e",
-};
-
 declare global {
   interface Window {
     __tourSeek?: (t: number) => Promise<void>;
@@ -48,6 +47,8 @@ export default function TourRenderPage() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MlMap | null>(null);
   const framesRef = useRef<CameraKeyframe[]>([]);
+  const vehiclesRef = useRef<TrafficVehicle[]>([]);
+  const cumRef = useRef<number[]>([]);
   // React's dev double-invoke runs this effect twice, and because the body
   // is async the cleanup fires before `map` is assigned - so `map?.remove()`
   // is a no-op and the first map is orphaned rather than torn down.
@@ -106,6 +107,14 @@ export default function TourRenderPage() {
 
       const path: LatLng[] = route.path;
       framesRef.current = buildCameraPath(path, 25);
+      cumRef.current = cumulativeDistances(path);
+      vehiclesRef.current = layOutTraffic(
+        (route.classSpans ?? []).map((c: { roadClass: string; startMeters: number; endMeters: number }) => ({
+          startMeters: c.startMeters,
+          endMeters: c.endMeters,
+          roadClass: c.roadClass as TrafficRoadClass,
+        }))
+      );
 
       setWorkerUrl("/maplibre/maplibre-gl-worker.mjs");
       setStatus("loading-map");
@@ -114,8 +123,8 @@ export default function TourRenderPage() {
         container: containerRef.current,
         style: satelliteStyle(),
         center: [path[0].lng, path[0].lat],
-        zoom: 17,
-        pitch: 66,
+        zoom: FLY_ZOOM,
+        pitch: FLY_PITCH,
         bearing: framesRef.current[0]?.bearing ?? 0,
         interactive: false,
         attributionControl: false,
@@ -128,70 +137,23 @@ export default function TourRenderPage() {
 
       const onLoad = () => {
         if (!map) return;
-        // `satelliteStyle()` ALREADY declares the terrain source, so
-        // adding it again throws `Source "terrain" already exists`. An
-        // earlier attempt to fix that by bailing out of this whole handler
-        // when the source existed made it bail every single time, turning
-        // a loud error into a silent hang - the renderer waited forever on
-        // __tourReady with nothing logged. Guard only the add; always call
-        // setTerrain, since that is what switches on 3D relief.
-        if (!map.getSource(TERRAIN_SOURCE_ID)) {
-          map.addSource(TERRAIN_SOURCE_ID, terrainSourceSpec());
+        for (const [name, oncoming] of [
+          ["car-with", false],
+          ["car-oncoming", true],
+        ] as const) {
+          if (!map.hasImage(name)) {
+            const img = makeCarIcon(oncoming);
+            if (img) map.addImage(name, img, { pixelRatio: 2 });
+          }
         }
-        map.setTerrain({ source: TERRAIN_SOURCE_ID, exaggeration: TERRAIN_EXAGGERATION });
-        map.addSource("route", {
-          type: "geojson",
-          data: {
-            type: "Feature",
-            geometry: { type: "LineString", coordinates: path.map((p) => [p.lng, p.lat]) },
-            properties: {},
-          },
-        });
-        map.addLayer({
-          id: "route-glow",
-          type: "line",
-          source: "route",
-          layout: { "line-cap": "round", "line-join": "round" },
-          paint: {
-            "line-color": ROUTE_COLOR[profile] ?? "#38bdf8",
-            "line-width": 20,
-            "line-blur": 14,
-            "line-opacity": 0.5,
-          },
-        });
-        map.addLayer({
-          id: "route-casing",
-          type: "line",
-          source: "route",
-          layout: { "line-cap": "round", "line-join": "round" },
-          paint: { "line-color": "#0f172a", "line-width": 11, "line-opacity": 0.9 },
-        });
-        map.addLayer({
-          id: "route-line",
-          type: "line",
-          source: "route",
-          layout: { "line-cap": "round", "line-join": "round" },
-          paint: { "line-color": ROUTE_COLOR[profile] ?? "#38bdf8", "line-width": 6 },
-        });
-        map.addSource("pos", {
-          type: "geojson",
-          data: {
-            type: "Feature",
-            geometry: { type: "Point", coordinates: [path[0].lng, path[0].lat] },
-            properties: {},
-          },
-        });
-        map.addLayer({
-          id: "pos-dot",
-          type: "circle",
-          source: "pos",
-          paint: {
-            "circle-radius": 10,
-            "circle-color": "#2563eb",
-            "circle-stroke-width": 3,
-            "circle-stroke-color": "#ffffff",
-          },
-        });
+        if (!map.hasImage("cyclist")) {
+          const img = makeCyclistIcon();
+          if (img) map.addImage("cyclist", img, { pixelRatio: 2 });
+        }
+        // Exactly the layers the interactive tour builds - see
+        // lib/tour/layers.ts. A rendered clip that does not match what
+        // the user saw on screen is the bug this shares code to avoid.
+        addTourLayers(map, { path, profile });
 
         window.__tourSeek = (t: number) =>
           new Promise<void>((resolve) => {
@@ -201,17 +163,33 @@ export default function TourRenderPage() {
             m.jumpTo({
               center: [frame.center.lng, frame.center.lat],
               bearing: frame.bearing,
-              pitch: 66,
-              zoom: 17,
+              pitch: FLY_PITCH,
+              zoom: FLY_ZOOM,
             });
-            (m.getSource("pos") as GeoJSONSource | undefined)?.setData({
+            (m.getSource("tour-position") as GeoJSONSource | undefined)?.setData({
               type: "Feature",
               geometry: { type: "Point", coordinates: [frame.center.lng, frame.center.lat] },
-              properties: {},
+              properties: { bearing: frame.bearing },
             });
+            const traffic = m.getSource("traffic") as GeoJSONSource | undefined;
+            if (traffic && vehiclesRef.current.length > 0) {
+              // Traffic advances with distance travelled rather than wall
+              // clock: frames are captured one at a time at whatever speed
+              // the machine manages, so a clock-based simulation would make
+              // the cars jump unpredictably between frames.
+              traffic.setData(
+                trafficAt(
+                  vehiclesRef.current,
+                  path,
+                  cumRef.current,
+                  frame.distanceMeters / 6,
+                  frame.distanceMeters
+                )
+              );
+            }
             // `idle` fires once every pending tile has loaded AND the frame
             // is painted. Screenshotting before it yields half-loaded
-            // imagery, which is the usual cause of flickering output.
+            // imagery, the usual cause of flickering output.
             if (m.loaded() && m.areTilesLoaded()) {
               m.once("render", () => resolve());
               m.triggerRepaint();
@@ -220,8 +198,19 @@ export default function TourRenderPage() {
             }
           });
 
-        window.__tourReady = true;
-        setStatus("ready");
+        void fetchCorridorBuildings(path)
+          .then((result) => {
+            const m = mapRef.current;
+            if (!m || result.count === 0 || !m.isStyleLoaded()) return;
+            applyRealBuildings(m, result.geojson, !result.partial);
+          })
+          .catch(() => {
+            /* tile buildings stand */
+          })
+          .finally(() => {
+            window.__tourReady = true;
+            setStatus("ready");
+          });
       };
 
       // `load` may already have fired by the time we attach, in which case

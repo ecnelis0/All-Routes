@@ -140,7 +140,11 @@ export class NodeSpatialIndex {
    * (common - the user drops a pin mid-park or offshore) still resolves
    * instead of failing.
    */
-  nearest(point: LatLng, maxMeters = 2000): number | null {
+  nearest(
+    point: LatLng,
+    maxMeters = 2000,
+    accept?: (nodeIndex: number) => boolean
+  ): number | null {
     const r0 = Math.floor(point.lat / this.cell);
     const c0 = Math.floor(point.lng / this.cell);
     let best = -1;
@@ -154,6 +158,9 @@ export class NodeSpatialIndex {
           const b = this.buckets.get(`${r0 + dr},${c0 + dc}`);
           if (!b) continue;
           for (const i of b) {
+            // `accept` lets the caller demand a node that can actually be
+            // used - see the degree filters in lib/routing/service.ts.
+            if (accept && !accept(i)) continue;
             const d = approxMeters(point, this.nodes[i]);
             if (d < bestD) {
               bestD = d;

@@ -33,6 +33,10 @@ export interface RoutingEngine {
   /** Danger score per directed edge id, 0-100. */
   scores: Float32Array;
   model: SafetyModel;
+  /** Edges leaving each node - a node with none can never be departed. */
+  outDegree: Uint16Array;
+  /** Edges arriving at each node - a node with none can never be reached. */
+  inDegree: Uint16Array;
   /** Set when a trained artifact was found; null means the baseline is in use. */
   modelSource: "trained" | "baseline";
   /**
@@ -117,8 +121,21 @@ export function getRoutingEngine(): RoutingEngine {
     seen.set(key, s);
   }
 
+  // Degree counts, used to refuse snapping onto nodes that cannot work.
+  // One-way geometry leaves genuine stubs: the node nearest Union Square
+  // has in-degree 0, so it can be left but never arrived at, and routing
+  // to it failed with "No bike route found" for a famous landmark.
+  const outDegree = new Uint16Array(graph.nodes.length);
+  const inDegree = new Uint16Array(graph.nodes.length);
+  for (const e of graph.edges) {
+    if (outDegree[e.from] < 65535) outDegree[e.from]++;
+    if (inDegree[e.to] < 65535) inDegree[e.to]++;
+  }
+
   engine = {
     graph,
+    outDegree,
+    inDegree,
     index: new NodeSpatialIndex(graph.nodes),
     scores,
     model,
@@ -387,11 +404,15 @@ export class RoutingError extends Error {}
 export function planRoutes(origin: LatLng, destination: LatLng): RouteSummary[] {
   const eng = getRoutingEngine();
 
-  const startNode = eng.index.nearest(origin);
+  // Snap to nodes that can actually serve as an origin and a destination.
+  // Nearest-node alone is not enough: one-way stubs exist with in-degree
+  // or out-degree 0, and landing on one makes the search unsolvable no
+  // matter how well connected the rest of the city is.
+  const startNode = eng.index.nearest(origin, 2000, (i) => eng.outDegree[i] > 0);
   if (startNode === null) {
     throw new RoutingError("Start point is not near any bike-routable street in the covered area.");
   }
-  const goalNode = eng.index.nearest(destination);
+  const goalNode = eng.index.nearest(destination, 2000, (i) => eng.inDegree[i] > 0);
   if (goalNode === null) {
     throw new RoutingError(
       "Destination is not near any bike-routable street in the covered area."
