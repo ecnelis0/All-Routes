@@ -190,6 +190,14 @@ export interface RouteSummary {
    * meaningful sense, so `NEAR_MISS_RADIUS_METERS` bounds it.
    */
   avoidedNearby: { name: string; atMeters: number; closestMeters: number }[];
+  /**
+   * Road classification along the route, positioned by distance.
+   *
+   * Drives the tour's illustrative traffic: how busy a street is tracks
+   * its class closely, and the class is real OSM data even though no
+   * per-street vehicle counts exist for San Francisco.
+   */
+  classSpans: { roadClass: string; startMeters: number; endMeters: number }[];
 }
 
 /**
@@ -237,6 +245,7 @@ function summarize(
   const entered = new Set<string>();
   const closest = new Map<string, { closestMeters: number; atMeters: number }>();
   const protectedSpans: RouteSummary["protectedSpans"] = [];
+  const classSpans: RouteSummary["classSpans"] = [];
   let metersInFlaggedAreas = 0;
   let travelled = 0;
 
@@ -285,6 +294,17 @@ function summarize(
       if (!prev || d < prev.closestMeters) {
         closest.set(area.name, { closestMeters: d, atMeters: travelled + e.lengthMeters / 2 });
       }
+    }
+
+    {
+      const last = classSpans[classSpans.length - 1];
+      if (last && last.roadClass === e.roadClass) last.endMeters = travelled + e.lengthMeters;
+      else
+        classSpans.push({
+          roadClass: e.roadClass,
+          startMeters: travelled,
+          endMeters: travelled + e.lengthMeters,
+        });
     }
 
     if (e.tier === "fullyProtected" || e.tier === "semiProtected") {
@@ -337,6 +357,11 @@ function summarize(
         startMeters: Math.round(sp.startMeters),
         endMeters: Math.round(sp.endMeters),
       })),
+    classSpans: classSpans.map((c) => ({
+      roadClass: c.roadClass,
+      startMeters: Math.round(c.startMeters),
+      endMeters: Math.round(c.endMeters),
+    })),
     avoidedNearby: [...closest.entries()]
       .filter(([name, c]) => !entered.has(name) && c.closestMeters <= NEAR_MISS_RADIUS_METERS)
       .map(([name, c]) => ({

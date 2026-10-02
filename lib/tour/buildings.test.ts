@@ -62,3 +62,40 @@ describe("corridorChunks", () => {
     expect(corridorChunks([])).toEqual([]);
   });
 });
+
+describe("chunk sizing against the endpoint's feature cap", () => {
+  it("keeps chunks small enough not to be truncated in dense areas", () => {
+    // The constraint that actually bites is the 6,000-feature cap, not
+    // the 0.08-degree size limit. A measured 0.01-degree box in the
+    // Sunset holds 2,322 buildings; at 0.05 degrees that is ~58,000, so
+    // the request silently returned an arbitrary 6,000 and the tour
+    // rendered scattered clumps with neighbourhoods missing.
+    const chunks = corridorChunks(CROSS_TOWN);
+    for (const c of chunks) {
+      expect(c.north - c.south).toBeLessThanOrEqual(0.015);
+    }
+  });
+
+  it("follows the route rather than filling its bounding box", () => {
+    // A diagonal cross-town route's bbox is mostly nowhere near the
+    // route. Fetching the whole rectangle is slower and loads buildings
+    // nobody sees.
+    const chunks = corridorChunks(CROSS_TOWN);
+    const latSpan = 0.0393 + 0.005;
+    const lngSpan = 0.1165 + 0.005;
+    const bboxCells = Math.ceil(latSpan / 0.012) * Math.ceil(lngSpan / 0.012);
+    expect(chunks.length).toBeLessThan(bboxCells * 0.6);
+  });
+
+  it("still covers every point on the route", () => {
+    for (const path of [SHORT, CROSS_TOWN]) {
+      const chunks = corridorChunks(path);
+      for (const p of path) {
+        const covered = chunks.some(
+          (c) => p.lat >= c.south && p.lat <= c.north && p.lng >= c.west && p.lng <= c.east
+        );
+        expect(covered, `${p.lat},${p.lng} not covered`).toBe(true);
+      }
+    }
+  });
+});

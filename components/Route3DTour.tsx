@@ -24,6 +24,14 @@ import {
 } from "@/lib/data/sfDangerousNeighborhoods";
 import { currentStreetAt } from "@/lib/tour/currentStreet";
 import { fetchCorridorBuildings } from "@/lib/tour/buildings";
+import { makeCarIcon, makeCyclistIcon } from "@/lib/tour/icons";
+import {
+  cumulativeDistances,
+  layOutTraffic,
+  trafficAt,
+  type TrafficRoadClass,
+  type TrafficVehicle,
+} from "@/lib/tour/traffic";
 import {
   activeAnnotation,
   buildAnnotations,
@@ -64,6 +72,7 @@ interface Props {
   path: LatLng[];
   profile: string;
   streetSpans?: StreetSpan[];
+  classSpans?: { roadClass: string; startMeters: number; endMeters: number }[];
   protectedSpans?: ProtectedSpan[];
   avoidedNearby?: AvoidedArea[];
   onClose: () => void;
@@ -83,14 +92,24 @@ function tourDurationSeconds(totalMeters: number): number {
   return Math.min(TOUR_MAX_SECONDS, Math.max(TOUR_MIN_SECONDS, scaled));
 }
 
-/** Street-level framing - matches the offscreen render target exactly. */
-const FLY_ZOOM = 17;
-const FLY_PITCH = 66;
+/**
+ * Camera framing.
+ *
+ * Pulled back from the original 17/66. At street level in the Financial
+ * District the towers are 150-200m and the camera ends up among them,
+ * with the route, the rider and the traffic all hidden behind a wall of
+ * building. A slightly higher, slightly shallower camera clears most
+ * massing while still reading as a street-level fly-through in the
+ * low-rise districts that make up most of the city.
+ */
+const FLY_ZOOM = 16.4;
+const FLY_PITCH = 58;
 
 export default function Route3DTour({
   path,
   profile,
   streetSpans = [],
+  classSpans = [],
   protectedSpans = [],
   avoidedNearby = [],
   onClose,
@@ -98,6 +117,7 @@ export default function Route3DTour({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MlMap | null>(null);
   const framesRef = useRef<CameraKeyframe[]>([]);
+  const pathRef = useRef<LatLng[]>([]);
   const rafRef = useRef<number | null>(null);
   const lastTickRef = useRef<number>(0);
   // Progress lives in a ref as well as state: the animation loop reads and
@@ -115,6 +135,14 @@ export default function Route3DTour({
   const [totalMeters, setTotalMeters] = useState(0);
   const [chromeVisible, setChromeVisible] = useState(true);
   const [realBuildings, setRealBuildings] = useState<number | null>(null);
+  const [showTraffic, setShowTraffic] = useState(true);
+  // Mirrors trafficRef.current.length as state: the render needs to know
+  // whether any traffic exists, and reading a ref during render is both a
+  // React violation and genuinely stale (refs do not trigger re-renders).
+  const [trafficCount, setTrafficCount] = useState(0);
+  const trafficRef = useRef<TrafficVehicle[]>([]);
+  const cumRef = useRef<number[]>([]);
+  const elapsedRef = useRef(0);
 
   const metersDone = totalMeters * progress;
   const currentStreet = currentStreetAt(streetSpans, metersDone);
@@ -138,8 +166,24 @@ export default function Route3DTour({
     src?.setData({
       type: "Feature",
       geometry: { type: "Point", coordinates: [frame.center.lng, frame.center.lat] },
-      properties: {},
+      // The camera already faces along the route, so the rider drawn at
+      // the centre must face the same way or it looks like it is sliding
+      // sideways down the street.
+      properties: { bearing: frame.bearing },
     });
+
+    const traffic = map.getSource("traffic") as GeoJSONSource | undefined;
+    if (traffic && trafficRef.current.length > 0) {
+      traffic.setData(
+        trafficAt(
+          trafficRef.current,
+          pathRef.current,
+          cumRef.current,
+          elapsedRef.current,
+          frame.distanceMeters
+        )
+      );
+    }
   }, []);
 
   /** Rebuilt after a style switch, since `setStyle` discards everything we added. */
@@ -282,16 +326,58 @@ export default function Route3DTour({
           },
         });
       }
+      // Traffic sits UNDER the rider so the rider is never hidden by a car.
+      if (!map.getSource("traffic")) {
+        map.addSource("traffic", {
+          type: "geojson",
+          data: { type: "FeatureCollection", features: [] },
+        });
+      }
+      for (const [name, oncoming] of [
+        ["car-with", false],
+        ["car-oncoming", true],
+      ] as const) {
+        if (!map.hasImage(name)) {
+          const img = makeCarIcon(oncoming);
+          if (img) map.addImage(name, img, { pixelRatio: 2 });
+        }
+      }
+      if (!map.getLayer("traffic-cars")) {
+        map.addLayer({
+          id: "traffic-cars",
+          type: "symbol",
+          source: "traffic",
+          layout: {
+            "icon-image": ["case", ["==", ["get", "oncoming"], 1], "car-oncoming", "car-with"],
+            "icon-rotate": ["get", "bearing"],
+            // Lie flat on the road and turn with the map, rather than
+            // facing the camera like a billboard.
+            "icon-rotation-alignment": "map",
+            "icon-pitch-alignment": "map",
+            "icon-allow-overlap": true,
+            "icon-ignore-placement": true,
+            "icon-size": ["interpolate", ["linear"], ["zoom"], 14, 0.35, 17, 0.8, 19, 1.1],
+          },
+        });
+      }
+
+      if (!map.hasImage("cyclist")) {
+        const img = makeCyclistIcon();
+        if (img) map.addImage("cyclist", img, { pixelRatio: 2 });
+      }
       if (!map.getLayer("tour-dot")) {
         map.addLayer({
           id: "tour-dot",
-          type: "circle",
+          type: "symbol",
           source: "tour-position",
-          paint: {
-            "circle-radius": 10,
-            "circle-color": "#2563eb",
-            "circle-stroke-width": 3,
-            "circle-stroke-color": "#ffffff",
+          layout: {
+            "icon-image": "cyclist",
+            "icon-rotate": ["get", "bearing"],
+            "icon-rotation-alignment": "map",
+            "icon-pitch-alignment": "map",
+            "icon-allow-overlap": true,
+            "icon-ignore-placement": true,
+            "icon-size": ["interpolate", ["linear"], ["zoom"], 14, 0.4, 17, 0.75, 19, 1],
           },
         });
       }
@@ -308,6 +394,18 @@ export default function Route3DTour({
     setWorkerUrl("/maplibre/maplibre-gl-worker.mjs");
 
     framesRef.current = buildCameraPath(path, 25);
+    pathRef.current = path;
+    cumRef.current = cumulativeDistances(path);
+    // Deterministic: the same route lays out the same traffic every time,
+    // so replays and screenshots stay comparable.
+    trafficRef.current = layOutTraffic(
+      classSpans.map((c) => ({
+        startMeters: c.startMeters,
+        endMeters: c.endMeters,
+        roadClass: c.roadClass as TrafficRoadClass,
+      }))
+    );
+    setTrafficCount(trafficRef.current.length);
     setTotalMeters(framesRef.current[framesRef.current.length - 1]?.distanceMeters ?? 0);
 
     const map = new MlMap({
@@ -379,15 +477,29 @@ export default function Route3DTour({
                 ],
                 "fill-extrusion-height": ["get", "height"],
                 "fill-extrusion-base": 0,
-                "fill-extrusion-opacity": 0.85,
+                // Opaque. At 0.85 every tower in a dense downtown block
+                // stacks its translucent faces on the ones behind, and the
+                // view turns into a milky white wash with no readable
+                // massing at all. Solid surfaces also let the renderer
+                // depth-cull, which is faster.
+                "fill-extrusion-opacity": 1,
+                "fill-extrusion-vertical-gradient": true,
               },
             });
           } else {
             (m.getSource("sf-buildings") as GeoJSONSource).setData(result.geojson);
           }
-          // Hide the tile buildings so the two do not z-fight.
-          if (m.getLayer("buildings-3d")) {
+          // Only hide the tile buildings when LiDAR coverage is complete.
+          // Hiding them under partial coverage leaves holes where whole
+          // neighbourhoods should be - worse than the generalised tiles.
+          if (!result.partial && m.getLayer("buildings-3d")) {
             m.setLayoutProperty("buildings-3d", "visibility", "none");
+          }
+          // Keep the things the tour is about above the city it is
+          // flying through; fill-extrusion otherwise paints over the
+          // ground-level route, rider and cars.
+          for (const id of ["route-glow", "route-casing", "route-line", "traffic-cars", "tour-dot"]) {
+            if (m.getLayer(id)) m.moveLayer(id);
           }
           setRealBuildings(result.count);
         })
@@ -403,7 +515,7 @@ export default function Route3DTour({
       map.remove();
       mapRef.current = null;
     };
-  }, [path, addOverlays]);
+  }, [path, classSpans, addOverlays]);
 
   // --- chrome auto-hide --------------------------------------------------
   useEffect(() => {
@@ -430,6 +542,15 @@ export default function Route3DTour({
   }
 
   // --- style switching ---------------------------------------------------
+  function toggleTraffic() {
+    const map = mapRef.current;
+    const next = !showTraffic;
+    setShowTraffic(next);
+    if (map?.getLayer("traffic-cars")) {
+      map.setLayoutProperty("traffic-cars", "visibility", next ? "visible" : "none");
+    }
+  }
+
   function switchMode(next: TourStyleMode) {
     const map = mapRef.current;
     if (!map || next === mode) return;
@@ -452,6 +573,7 @@ export default function Route3DTour({
       const dt = (now - lastTickRef.current) / 1000;
       lastTickRef.current = now;
 
+      elapsedRef.current += dt;
       if (totalMeters > 0) {
         const next = progressRef.current + dt / tourDurationSeconds(totalMeters);
         if (next >= 1) {
@@ -661,6 +783,18 @@ export default function Route3DTour({
         </div>
         <button
           type="button"
+          onClick={toggleTraffic}
+          aria-pressed={showTraffic}
+          className={`rounded-full border px-3 py-1.5 text-xs backdrop-blur transition-colors ${
+            showTraffic
+              ? "border-white/40 bg-white text-slate-900"
+              : "border-white/20 bg-slate-950/70 text-slate-200 hover:bg-white/10"
+          }`}
+        >
+          Traffic
+        </button>
+        <button
+          type="button"
           onClick={overview}
           className="rounded-full border border-white/20 bg-slate-950/70 px-3 py-1.5 text-xs text-slate-200 backdrop-blur hover:bg-white/10"
         >
@@ -722,6 +856,19 @@ export default function Route3DTour({
       {fatalError && (
         <div className="absolute inset-0 flex items-center justify-center p-6 text-center text-sm text-red-300">
           {fatalError}
+        </div>
+      )}
+      {showTraffic && trafficCount > 0 && (
+        <div
+          className={`pointer-events-none absolute bottom-28 right-4 rounded bg-slate-950/70 px-2 py-1 text-[10px] text-slate-300 transition-opacity duration-500 ${fade}`}
+        >
+          {/*
+            Said plainly whenever the cars are on screen. San Francisco
+            publishes no per-street vehicle volumes, so this is an
+            illustration keyed to real road classification - not counts,
+            and not live.
+          */}
+          Traffic is illustrative · density by road class, not live data
         </div>
       )}
       {realBuildings !== null && (
