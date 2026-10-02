@@ -23,6 +23,7 @@ import {
   neighborhoodRiskColor,
 } from "@/lib/data/sfDangerousNeighborhoods";
 import { currentStreetAt } from "@/lib/tour/currentStreet";
+import { fetchCorridorBuildings } from "@/lib/tour/buildings";
 import {
   activeAnnotation,
   buildAnnotations,
@@ -113,6 +114,7 @@ export default function Route3DTour({
   const [mode, setMode] = useState<TourStyleMode>("satellite");
   const [totalMeters, setTotalMeters] = useState(0);
   const [chromeVisible, setChromeVisible] = useState(true);
+  const [realBuildings, setRealBuildings] = useState<number | null>(null);
 
   const metersDone = totalMeters * progress;
   const currentStreet = currentStreetAt(streetSpans, metersDone);
@@ -339,14 +341,63 @@ export default function Route3DTour({
       setFatalError(msg || "The 3D basemap failed to load.");
     });
 
+    const abort = new AbortController();
+
     map.on("load", () => {
       addOverlays(map);
       const b = pathBounds(path);
       if (b) map.fitBounds(b, { padding: 70, pitch: 40, duration: 0 });
       setReady(true);
+
+      // Swap the generalised vector-tile buildings for San Francisco's own
+      // LiDAR-measured footprints along this corridor. Done after the map
+      // is usable rather than before, so the tour is never blocked on a
+      // third-party dataset - if it never arrives the tile buildings
+      // stand and the view is merely less complete.
+      void fetchCorridorBuildings(path, abort.signal)
+        .then((result) => {
+          if (abort.signal.aborted || result.count === 0) return;
+          const m = mapRef.current;
+          if (!m || !m.isStyleLoaded()) return;
+          if (!m.getSource("sf-buildings")) {
+            m.addSource("sf-buildings", { type: "geojson", data: result.geojson });
+            m.addLayer({
+              id: "sf-buildings-3d",
+              type: "fill-extrusion",
+              source: "sf-buildings",
+              paint: {
+                "fill-extrusion-color": [
+                  "interpolate",
+                  ["linear"],
+                  ["get", "height"],
+                  0,
+                  "#8d93a6",
+                  40,
+                  "#a7adbd",
+                  120,
+                  "#c9cedb",
+                ],
+                "fill-extrusion-height": ["get", "height"],
+                "fill-extrusion-base": 0,
+                "fill-extrusion-opacity": 0.85,
+              },
+            });
+          } else {
+            (m.getSource("sf-buildings") as GeoJSONSource).setData(result.geojson);
+          }
+          // Hide the tile buildings so the two do not z-fight.
+          if (m.getLayer("buildings-3d")) {
+            m.setLayoutProperty("buildings-3d", "visibility", "none");
+          }
+          setRealBuildings(result.count);
+        })
+        .catch(() => {
+          /* tile buildings remain; nothing to surface */
+        });
     });
 
     return () => {
+      abort.abort();
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
       if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
       map.remove();
@@ -671,6 +722,13 @@ export default function Route3DTour({
       {fatalError && (
         <div className="absolute inset-0 flex items-center justify-center p-6 text-center text-sm text-red-300">
           {fatalError}
+        </div>
+      )}
+      {realBuildings !== null && (
+        <div
+          className={`pointer-events-none absolute bottom-20 right-4 rounded bg-slate-950/70 px-2 py-1 text-[10px] text-slate-300 transition-opacity duration-500 ${fade}`}
+        >
+          {realBuildings.toLocaleString()} buildings · SF LiDAR footprints
         </div>
       )}
       {tileWarning && !fatalError && (
