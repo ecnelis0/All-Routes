@@ -522,6 +522,7 @@ export default function Home() {
           <Route3DTour
             path={activeRoute.path}
             profile={activeRoute.profile}
+            streetSpans={activeRoute.streetSpans}
             onClose={() => setTourOpen(false)}
           />
         )}

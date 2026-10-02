@@ -22,11 +22,19 @@ import {
   SF_DANGEROUS_NEIGHBORHOODS,
   neighborhoodRiskColor,
 } from "@/lib/data/sfDangerousNeighborhoods";
+import { currentStreetAt } from "@/lib/tour/currentStreet";
+import type { StreetSpan } from "@/lib/tour/currentStreet";
 import type { LatLng } from "@/lib/types";
 
 /**
- * 3D fly-through of a computed route over real aerial imagery and real
+ * Cinematic 3D fly-through of a route, over real aerial imagery and real
  * terrain.
+ *
+ * The layout is deliberately full-bleed: the map fills the whole surface
+ * and every control floats over it, fading away while the tour plays.
+ * An earlier version framed the map between a header and footer bar,
+ * which both ate vertical space and made it read as a widget rather than
+ * a view of the city.
  *
  * See `lib/tour/style.ts` for why this is not Google photorealistic 3D
  * (Map Tiles, 3D Tiles and Street View are all un-activated on this
@@ -39,9 +47,16 @@ const ROUTE_COLOR: Record<string, string> = {
   safest: "#22c55e",
 };
 
+const PROFILE_LABEL: Record<string, string> = {
+  fastest: "Fastest",
+  balanced: "Safer",
+  safest: "Safest",
+};
+
 interface Props {
   path: LatLng[];
   profile: string;
+  streetSpans?: StreetSpan[];
   onClose: () => void;
 }
 
@@ -50,16 +65,20 @@ interface Props {
  * rather than flown at a fixed ground speed: at a realistic 7 m/s a 17km
  * route takes 40 minutes to watch, which is a commute, not a tour.
  */
-const TOUR_TARGET_SECONDS = 45;
-const TOUR_MIN_SECONDS = 15;
-const TOUR_MAX_SECONDS = 90;
+const TOUR_TARGET_SECONDS = 50;
+const TOUR_MIN_SECONDS = 18;
+const TOUR_MAX_SECONDS = 100;
 
 function tourDurationSeconds(totalMeters: number): number {
   const scaled = TOUR_TARGET_SECONDS * Math.sqrt(Math.max(1, totalMeters) / 5000);
   return Math.min(TOUR_MAX_SECONDS, Math.max(TOUR_MIN_SECONDS, scaled));
 }
 
-export default function Route3DTour({ path, profile, onClose }: Props) {
+/** Street-level framing - matches the offscreen render target exactly. */
+const FLY_ZOOM = 17;
+const FLY_PITCH = 66;
+
+export default function Route3DTour({ path, profile, streetSpans = [], onClose }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MlMap | null>(null);
   const framesRef = useRef<CameraKeyframe[]>([]);
@@ -69,6 +88,7 @@ export default function Route3DTour({ path, profile, onClose }: Props) {
   // writes it every frame, and routing that through React state would both
   // lag a frame behind and re-render 60 times a second.
   const progressRef = useRef(0);
+  const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [progress, setProgress] = useState(0);
   const [playing, setPlaying] = useState(false);
@@ -77,6 +97,10 @@ export default function Route3DTour({ path, profile, onClose }: Props) {
   const [tileWarning, setTileWarning] = useState(false);
   const [mode, setMode] = useState<TourStyleMode>("satellite");
   const [totalMeters, setTotalMeters] = useState(0);
+  const [chromeVisible, setChromeVisible] = useState(true);
+
+  const metersDone = totalMeters * progress;
+  const currentStreet = currentStreetAt(streetSpans, metersDone);
 
   const applyCamera = useCallback((t: number) => {
     const map = mapRef.current;
@@ -85,8 +109,8 @@ export default function Route3DTour({ path, profile, onClose }: Props) {
     map.jumpTo({
       center: [frame.center.lng, frame.center.lat],
       bearing: frame.bearing,
-      pitch: 66,
-      zoom: 17,
+      pitch: FLY_PITCH,
+      zoom: FLY_ZOOM,
     });
     const src = map.getSource("tour-position") as GeoJSONSource | undefined;
     src?.setData({
@@ -96,18 +120,12 @@ export default function Route3DTour({ path, profile, onClose }: Props) {
     });
   }, []);
 
-  /**
-   * Adds everything that sits on top of the basemap. Called on first load
-   * and again after a style switch, because `setStyle` discards every
-   * source and layer the application added.
-   */
+  /** Rebuilt after a style switch, since `setStyle` discards everything we added. */
   const addOverlays = useCallback(
     (map: MlMap) => {
       if (!map.getSource(TERRAIN_SOURCE_ID)) {
         map.addSource(TERRAIN_SOURCE_ID, terrainSourceSpec());
       }
-      // Real topography. San Francisco is the city where this matters most:
-      // without it a route over Nob Hill and one around it look identical.
       map.setTerrain({ source: TERRAIN_SOURCE_ID, exaggeration: TERRAIN_EXAGGERATION });
 
       if (!map.getSource("danger-areas")) {
@@ -133,12 +151,10 @@ export default function Route3DTour({ path, profile, onClose }: Props) {
           source: "danger-areas",
           paint: {
             "fill-extrusion-color": ["get", "color"],
-            // A low slab rather than a tall volume: tall translucent boxes
-            // over photography wash the imagery out and hide the very
-            // streets the tour exists to show. Near ground level it reads
-            // as a tinted zone you fly over.
+            // Low slab, not a tall volume: tall translucent boxes over
+            // photography wash out the streets the tour exists to show.
             "fill-extrusion-height": 18,
-            "fill-extrusion-opacity": 0.3,
+            "fill-extrusion-opacity": 0.26,
           },
         });
       }
@@ -154,9 +170,9 @@ export default function Route3DTour({ path, profile, onClose }: Props) {
         });
       }
       if (!map.getLayer("route-glow")) {
-        // Three stacked lines: a soft wide glow, a dark casing, then the
-        // route. Over aerial photography a single stroke disappears
-        // against pale concrete and dark shadow alike.
+        // Three stacked lines: soft glow, dark casing, then the route.
+        // A single stroke disappears against both pale concrete and dark
+        // shadow in aerial imagery.
         map.addLayer({
           id: "route-glow",
           type: "line",
@@ -164,8 +180,8 @@ export default function Route3DTour({ path, profile, onClose }: Props) {
           layout: { "line-cap": "round", "line-join": "round" },
           paint: {
             "line-color": ROUTE_COLOR[profile] ?? "#38bdf8",
-            "line-width": 20,
-            "line-blur": 14,
+            "line-width": 22,
+            "line-blur": 15,
             "line-opacity": 0.5,
           },
         });
@@ -265,9 +281,8 @@ export default function Route3DTour({ path, profile, onClose }: Props) {
   useEffect(() => {
     if (!containerRef.current || path.length < 2) return;
 
-    // Point MapLibre at the worker we serve ourselves. Under Turbopack its
-    // own `new URL(..., import.meta.url)` resolution lands on a path that
-    // does not exist and the map dies with "Worker failed to load".
+    // Under Turbopack MapLibre's own worker URL resolution lands on a path
+    // that does not exist, and the map dies with "Worker failed to load".
     setWorkerUrl("/maplibre/maplibre-gl-worker.mjs");
 
     framesRef.current = buildCameraPath(path, 25);
@@ -277,15 +292,13 @@ export default function Route3DTour({ path, profile, onClose }: Props) {
       container: containerRef.current,
       style: satelliteStyle(),
       center: [path[0].lng, path[0].lat],
-      zoom: 16,
-      pitch: 60,
+      zoom: 15,
+      pitch: 50,
       bearing: framesRef.current[0]?.bearing ?? 0,
       attributionControl: { compact: true },
       // Keeps the WebGL drawing buffer readable after each frame, so
-      // screenshots and readPixels return what is actually on screen.
-      // Without it both come back black at random, which makes "is the 3D
-      // view rendering?" unanswerable - a false signal that already cost
-      // time once on this component.
+      // screenshots and readPixels return what is on screen. Without it
+      // both come back black at random.
       canvasContextAttributes: { preserveDrawingBuffer: true },
       maxPitch: 80,
     });
@@ -293,11 +306,9 @@ export default function Route3DTour({ path, profile, onClose }: Props) {
 
     map.on("error", (e) => {
       const msg = e.error?.message ?? "";
-      // Individual tiles fail routinely: a gap in coverage, a transient
-      // 5xx, a request cancelled by a fast pan. Treating any of those as
-      // fatal (which an earlier version did) replaces a perfectly good map
-      // with an error screen. Only failing to load the style itself is
-      // unrecoverable.
+      // Individual tiles fail routinely. Treating any of those as fatal
+      // replaces a working map with an error screen; only a style-level
+      // failure is unrecoverable.
       const isTileLevel =
         Boolean((e as unknown as { sourceId?: string }).sourceId) ||
         /tile|fetch|abort|network|204|404|50\d/i.test(msg);
@@ -311,16 +322,41 @@ export default function Route3DTour({ path, profile, onClose }: Props) {
     map.on("load", () => {
       addOverlays(map);
       const b = pathBounds(path);
-      if (b) map.fitBounds(b, { padding: 70, pitch: 45, duration: 0 });
+      if (b) map.fitBounds(b, { padding: 70, pitch: 40, duration: 0 });
       setReady(true);
     });
 
     return () => {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
       map.remove();
       mapRef.current = null;
     };
   }, [path, addOverlays]);
+
+  // --- chrome auto-hide --------------------------------------------------
+  useEffect(() => {
+    if (!playing) return;
+    // Fade the controls out shortly after playback starts so the city, not
+    // the UI, is what you are looking at. Any pointer movement brings them
+    // back - see wakeChrome.
+    //
+    // Only ever *hides*. Showing again on pause is derived below rather
+    // than set here: calling setState synchronously in an effect triggers
+    // a cascading render, and the paused state is a pure function of
+    // `playing` anyway.
+    hideTimerRef.current = setTimeout(() => setChromeVisible(false), 1800);
+    return () => {
+      if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
+    };
+  }, [playing]);
+
+  function wakeChrome() {
+    if (!playing) return; // already visible by derivation
+    setChromeVisible(true);
+    if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
+    hideTimerRef.current = setTimeout(() => setChromeVisible(false), 2200);
+  }
 
   // --- style switching ---------------------------------------------------
   function switchMode(next: TourStyleMode) {
@@ -329,8 +365,6 @@ export default function Route3DTour({ path, profile, onClose }: Props) {
     setMode(next);
     setReady(false);
     map.setStyle(next === "satellite" ? satelliteStyle() : mapStyleUrl());
-    // `setStyle` discards every source and layer we added, so they have to
-    // be rebuilt once the new style settles.
     map.once("styledata", () => {
       addOverlays(map);
       applyCamera(progressRef.current);
@@ -369,13 +403,45 @@ export default function Route3DTour({ path, profile, onClose }: Props) {
     };
   }, [playing, ready, applyCamera, totalMeters]);
 
-  function startOrResume() {
-    if (progressRef.current >= 1) {
-      progressRef.current = 0;
-      setProgress(0);
+  /**
+   * Starts the tour from the beginning with a short descent from the
+   * overview into street level, then hands over to the animation loop.
+   *
+   * The descent exists so the viewer keeps their bearings: cutting
+   * straight from a whole-city overview to a rooftop-height camera is
+   * disorienting, and they lose track of which end of the route they are
+   * at. `flyTo` is used only here - during playback the camera is driven
+   * frame by frame by `applyCamera`, because easing between keyframes
+   * would fight the constant-speed traversal.
+   */
+  function startFromBeginning() {
+    const map = mapRef.current;
+    if (!map) return;
+    progressRef.current = 0;
+    setProgress(0);
+    const frame = sampleCameraPath(framesRef.current, 0);
+    if (!frame) return;
+    map.flyTo({
+      center: [frame.center.lng, frame.center.lat],
+      bearing: frame.bearing,
+      pitch: FLY_PITCH,
+      zoom: FLY_ZOOM,
+      duration: 1600,
+      essential: true,
+    });
+    map.once("moveend", () => setPlaying(true));
+  }
+
+  function togglePlay() {
+    if (playing) {
+      setPlaying(false);
+      return;
     }
-    applyCamera(progressRef.current);
-    setPlaying(true);
+    if (progressRef.current <= 0 || progressRef.current >= 1) startFromBeginning();
+    else {
+      applyCamera(progressRef.current);
+      setPlaying(true);
+    }
   }
 
   function scrub(value: number) {
@@ -389,91 +455,131 @@ export default function Route3DTour({ path, profile, onClose }: Props) {
     setPlaying(false);
     const map = mapRef.current;
     const b = pathBounds(path);
-    if (map && b) map.fitBounds(b, { padding: 70, pitch: 45, duration: 900 });
+    if (map && b) map.fitBounds(b, { padding: 70, pitch: 40, duration: 900 });
   }
 
-  const metersDone = Math.round(totalMeters * progress);
+  const miDone = metersDone / 1609.34;
+  const miTotal = totalMeters / 1609.34;
+  // Controls are always on while paused; auto-hide applies only during
+  // playback, so this is derived rather than stored.
+  const showChrome = !playing || chromeVisible;
+  const fade = showChrome ? "opacity-100" : "opacity-0";
 
   return (
-    <div className="absolute inset-0 z-40 flex flex-col bg-slate-950">
-      <div className="flex items-center justify-between gap-3 border-b border-slate-800 bg-slate-950 px-4 py-2">
-        <div className="flex items-center gap-2">
-          <span className="text-sm font-semibold text-white">3D route tour</span>
-          <span
-            className="rounded px-1.5 py-0.5 text-[11px] font-semibold text-slate-900"
-            style={{ background: ROUTE_COLOR[profile] ?? "#38bdf8" }}
-          >
-            {profile}
+    <div
+      className="absolute inset-0 z-40 bg-slate-950"
+      onPointerMove={wakeChrome}
+      onPointerDown={wakeChrome}
+    >
+      {/*
+        h-full, not `absolute inset-0`: maplibre-gl.css sets
+        `.maplibregl-map { position: relative }` on this same element and
+        loads after Tailwind, so at equal specificity it wins, `inset-0`
+        stops applying, and the container collapses to 0 height.
+      */}
+      <div ref={containerRef} className="tour-map h-full w-full" />
+      {/*
+        Attribution is a licence requirement for Esri and OpenStreetMap, so
+        it stays - but MapLibre renders it as a full-width bar that ate two
+        lines across the bottom of the view. Shrunk and dimmed rather than
+        removed.
+      */}
+      <style jsx global>{`
+        .tour-map .maplibregl-ctrl-attrib {
+          background: rgba(2, 6, 23, 0.55);
+          color: rgba(226, 232, 240, 0.75);
+          font-size: 9px;
+          line-height: 1.25;
+          padding: 1px 6px;
+          max-width: 46vw;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          border-radius: 6px 0 0 0;
+        }
+        .tour-map .maplibregl-ctrl-attrib a {
+          color: rgba(226, 232, 240, 0.85);
+        }
+        .tour-map .maplibregl-ctrl-bottom-right {
+          bottom: 0;
+        }
+      `}</style>
+
+      {/*
+        Heads-up stays visible while playing: the street you are currently
+        on is the narration of the tour, not a control. Only the buttons
+        and transport bar fade.
+      */}
+      <div className="pointer-events-none absolute left-4 top-4 flex flex-col gap-1.5">
+        <span
+          className="w-fit rounded-full px-2.5 py-1 text-[11px] font-semibold text-slate-900 shadow-lg"
+          style={{ background: ROUTE_COLOR[profile] ?? "#38bdf8" }}
+        >
+          {PROFILE_LABEL[profile] ?? profile} route
+        </span>
+        {currentStreet && (
+          <span className="w-fit max-w-[22rem] truncate rounded-md bg-slate-950/70 px-2.5 py-1.5 text-sm font-medium text-white shadow-lg backdrop-blur">
+            {currentStreet}
           </span>
-        </div>
-        <div className="flex items-center gap-2">
-          <div className="flex overflow-hidden rounded-md border border-slate-700">
-            {(["satellite", "map"] as const).map((m) => (
-              <button
-                key={m}
-                type="button"
-                onClick={() => switchMode(m)}
-                className={`px-2.5 py-1 text-xs transition-colors ${
-                  mode === m
-                    ? "bg-slate-200 text-slate-900"
-                    : "bg-slate-900 text-slate-300 hover:bg-slate-800"
-                }`}
-              >
-                {m === "satellite" ? "Satellite" : "Map"}
-              </button>
-            ))}
-          </div>
-          <button
-            type="button"
-            onClick={overview}
-            className="rounded-md border border-slate-700 px-2.5 py-1 text-xs text-slate-200 hover:bg-slate-800"
-          >
-            Overview
-          </button>
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded-md border border-slate-700 px-2.5 py-1 text-xs text-slate-200 hover:bg-slate-800"
-          >
-            Close
-          </button>
-        </div>
-      </div>
-
-      <div className="relative flex-1">
-        {/*
-          h-full, not `absolute inset-0`: maplibre-gl.css sets
-          `.maplibregl-map { position: relative }` on this same element and
-          loads after Tailwind, so at equal specificity it wins, `inset-0`
-          stops applying, and the container collapses to 0 height (MapLibre
-          then falls back to a 300px canvas).
-        */}
-        <div ref={containerRef} className="h-full w-full" />
-        {!ready && !fatalError && (
-          <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-slate-950/70 text-sm text-slate-200">
-            Loading aerial imagery and terrain…
-          </div>
-        )}
-        {fatalError && (
-          <div className="absolute inset-0 flex items-center justify-center p-6 text-center text-sm text-red-300">
-            {fatalError}
-          </div>
-        )}
-        {tileWarning && !fatalError && (
-          <div className="pointer-events-none absolute bottom-2 left-2 rounded bg-slate-900/80 px-2 py-1 text-[10px] text-slate-300">
-            Some imagery tiles didn&apos;t load
-          </div>
         )}
       </div>
 
-      <div className="flex items-center gap-3 border-t border-slate-800 bg-slate-950 px-4 py-2.5">
+      {/* --- floating controls --- */}
+      <div
+        className={`absolute right-4 top-4 flex items-center gap-2 transition-opacity duration-500 ${fade}`}
+      >
+        <div className="flex overflow-hidden rounded-full border border-white/20 bg-slate-950/70 backdrop-blur">
+          {(["satellite", "map"] as const).map((m) => (
+            <button
+              key={m}
+              type="button"
+              onClick={() => switchMode(m)}
+              className={`px-3 py-1.5 text-xs transition-colors ${
+                mode === m ? "bg-white text-slate-900" : "text-slate-200 hover:bg-white/10"
+              }`}
+            >
+              {m === "satellite" ? "Satellite" : "Map"}
+            </button>
+          ))}
+        </div>
         <button
           type="button"
-          onClick={() => (playing ? setPlaying(false) : startOrResume())}
-          disabled={!ready}
-          className="rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-50"
+          onClick={overview}
+          className="rounded-full border border-white/20 bg-slate-950/70 px-3 py-1.5 text-xs text-slate-200 backdrop-blur hover:bg-white/10"
         >
-          {playing ? "Pause" : progress >= 1 ? "Replay" : "Play tour"}
+          Overview
+        </button>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Close 3D tour"
+          className="rounded-full border border-white/20 bg-slate-950/70 px-3 py-1.5 text-xs text-slate-200 backdrop-blur hover:bg-white/10"
+        >
+          Close
+        </button>
+      </div>
+
+      {/* --- floating transport bar --- */}
+      <div
+        className={`absolute bottom-5 left-1/2 flex w-[min(44rem,calc(100%-2rem))] -translate-x-1/2 items-center gap-3 rounded-full border border-white/15 bg-slate-950/70 px-3 py-2.5 shadow-2xl backdrop-blur transition-opacity duration-500 ${fade}`}
+      >
+        <button
+          type="button"
+          onClick={togglePlay}
+          disabled={!ready}
+          aria-label={playing ? "Pause tour" : "Play tour"}
+          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-white text-slate-900 transition-transform hover:scale-105 disabled:opacity-40"
+        >
+          {playing ? (
+            <svg width="13" height="13" viewBox="0 0 12 12" fill="currentColor" aria-hidden>
+              <rect x="1.5" y="1" width="3" height="10" rx="1" />
+              <rect x="7.5" y="1" width="3" height="10" rx="1" />
+            </svg>
+          ) : (
+            <svg width="13" height="13" viewBox="0 0 12 12" fill="currentColor" aria-hidden>
+              <path d="M2.5 1.2v9.6a.6.6 0 0 0 .92.5l7.3-4.8a.6.6 0 0 0 0-1l-7.3-4.8a.6.6 0 0 0-.92.5Z" />
+            </svg>
+          )}
         </button>
         <input
           type="range"
@@ -484,12 +590,30 @@ export default function Route3DTour({ path, profile, onClose }: Props) {
           disabled={!ready}
           aria-label="Tour progress"
           onChange={(e) => scrub(Number(e.target.value))}
-          className="flex-1 accent-blue-500"
+          className="h-1 flex-1 cursor-pointer accent-white"
         />
-        <span className="w-28 text-right text-[11px] tabular-nums text-slate-300">
-          {(metersDone / 1609.34).toFixed(2)} / {(totalMeters / 1609.34).toFixed(2)} mi
+        <span className="w-24 shrink-0 text-right text-[11px] tabular-nums text-slate-200">
+          {miDone.toFixed(2)} / {miTotal.toFixed(2)} mi
         </span>
       </div>
+
+      {!ready && !fatalError && (
+        <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-slate-950/70 text-sm text-slate-200">
+          Loading aerial imagery and terrain…
+        </div>
+      )}
+      {fatalError && (
+        <div className="absolute inset-0 flex items-center justify-center p-6 text-center text-sm text-red-300">
+          {fatalError}
+        </div>
+      )}
+      {tileWarning && !fatalError && (
+        <div
+          className={`pointer-events-none absolute bottom-20 left-4 rounded bg-slate-950/70 px-2 py-1 text-[10px] text-slate-300 transition-opacity duration-500 ${fade}`}
+        >
+          Some imagery tiles didn&apos;t load
+        </div>
+      )}
     </div>
   );
 }

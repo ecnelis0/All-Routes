@@ -150,6 +150,14 @@ export interface RouteSummary {
   /** Named streets the route uses, in order, deduped - a crude turn list. */
   streets: string[];
   /**
+   * Where each named street starts and ends along the route, in metres.
+   *
+   * `streets` alone cannot answer "what am I riding on right now", which
+   * is what the 3D tour needs as the camera moves: it has an ordered list
+   * of names but no idea where along the route each one applies.
+   */
+  streetSpans: { name: string; startMeters: number; endMeters: number }[];
+  /**
    * Flagged neighbourhoods the route passes through, with how far it rides
    * inside each. The headline "did it actually avoid them?" number - a
    * mean-danger improvement can hide a route that still crosses the same
@@ -186,8 +194,10 @@ function summarize(
   let weightedDanger = 0;
   let maxDanger = 0;
   const streets: string[] = [];
+  const streetSpans: { name: string; startMeters: number; endMeters: number }[] = [];
   const perArea = new Map<string, number>();
   let metersInFlaggedAreas = 0;
+  let travelled = 0;
 
   for (const e of route.edges) {
     const s = scores[e.id];
@@ -195,6 +205,22 @@ function summarize(
     if (s > maxDanger) maxDanger = s;
     tierBreakdown[e.tier] += e.lengthMeters;
     if (e.name && streets[streets.length - 1] !== e.name) streets.push(e.name);
+
+    if (e.name) {
+      const last = streetSpans[streetSpans.length - 1];
+      // Extend the current span rather than starting a new one when the
+      // street has not changed - OSM splits a single street into many
+      // edges, and one span per edge would make the label flicker every
+      // few metres.
+      if (last && last.name === e.name) last.endMeters = travelled + e.lengthMeters;
+      else
+        streetSpans.push({
+          name: e.name,
+          startMeters: travelled,
+          endMeters: travelled + e.lengthMeters,
+        });
+    }
+    travelled += e.lengthMeters;
 
     // Attributed by edge midpoint - an edge is counted as wholly inside or
     // wholly outside. At SF block scale (~100m edges against 400m+ areas)
@@ -223,6 +249,11 @@ function summarize(
       1000,
     tierBreakdown,
     streets,
+    streetSpans: streetSpans.map((sp) => ({
+      name: sp.name,
+      startMeters: Math.round(sp.startMeters),
+      endMeters: Math.round(sp.endMeters),
+    })),
     neighborhoodsEntered: [...perArea.entries()]
       .map(([name, meters]) => ({ name, meters: Math.round(meters) }))
       .sort((x, y) => y.meters - x.meters),
