@@ -253,8 +253,12 @@ export default function Home() {
   const hasBothEnds = Boolean(origin && destination);
 
   return (
-    <div className="flex flex-1 overflow-hidden">
-      <aside className="flex w-80 flex-shrink-0 flex-col gap-4 overflow-y-auto border-r border-slate-200 bg-white p-4">
+    // min-h-0 on every flex child in this chain. Flex items default to
+    // min-height:auto, which means they refuse to shrink below their
+    // content - so `overflow-y-auto` on the sidebar never engaged and a
+    // long route panel stretched the whole row instead of scrolling.
+    <div className="flex min-h-0 flex-1 overflow-hidden">
+      <aside className="flex min-h-0 w-80 flex-shrink-0 flex-col gap-4 overflow-y-auto border-r border-slate-200 bg-white p-4">
         <div>
           <h1 className="text-lg font-bold text-black">🚲 Safe Route</h1>
           <p className="mt-1 text-xs text-black">San Francisco, CA</p>
@@ -508,7 +512,7 @@ export default function Home() {
       </aside>
 
       {/* relative so the 3D tour overlay can position against the map area */}
-      <main className="relative flex-1">
+      <main className="relative min-h-0 flex-1">
         <MapView
           center={data?.city.center ?? { lat: 37.7749, lng: -122.4194 }}
           isLoaded={isLoaded}

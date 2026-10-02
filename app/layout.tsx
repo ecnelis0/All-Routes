@@ -28,7 +28,13 @@ export default function RootLayout({
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col">{children}</body>
+      {/*
+        h-full + overflow-hidden, not min-h-full. This is a fixed-viewport
+        map app: the sidebar scrolls internally and the map fills the rest.
+        With min-h-full the body is free to grow past the viewport, and a
+        long sidebar pushed the 3D tour's transport bar below the fold.
+      */}
+      <body className="h-full overflow-hidden flex flex-col">{children}</body>
     </html>
   );
 }
