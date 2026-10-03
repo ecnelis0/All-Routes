@@ -147,9 +147,13 @@ describe("findRoute", () => {
   });
 
   it("reports cost separately from distance, inflated by danger", () => {
-    const r = findRoute(graph, () => 50, 0, 3, ROUTE_PROFILES.balanced)!;
-    // safetyWeight 1.5 at score 50 => every metre costs 1.75 effective metres.
-    expect(r.costMeters).toBeCloseTo(r.distanceMeters * 1.75, 5);
+    const p = ROUTE_PROFILES.balanced;
+    const r = findRoute(graph, () => 50, 0, 3, p)!;
+    // Derived from the profile rather than hard-coded, so retuning the
+    // weights does not silently invalidate the assertion. The test graph
+    // is all `tier: "none"`, so the unprotected penalty applies too.
+    const perMetre = (1 + p.safetyWeight * 0.5) * p.unprotectedPenalty;
+    expect(r.costMeters).toBeCloseTo(r.distanceMeters * perMetre, 5);
     expect(r.costMeters).toBeGreaterThan(r.distanceMeters);
   });
 

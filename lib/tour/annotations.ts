@@ -32,8 +32,18 @@ export interface TourAnnotation {
  * flash by on a long route and linger on a short one.
  */
 const AVOIDED_VISIBLE_METERS = 320;
-/** Minimum on-screen distance for a protected lane, so short ones still register. */
-const PROTECTED_MIN_VISIBLE_METERS = 180;
+/**
+ * Protected-lane callouts end exactly where the lane ends.
+ *
+ * They used to be padded to a 180m minimum so short lanes stayed
+ * readable. That made the caption outlive the lane: measured across every
+ * landmark pair, 9.9% of the positions where a protected-lane callout was
+ * on screen had the rider already on a different street - the banner said
+ * "Market Street" while they were on Mission. A caption that is wrong one
+ * time in ten is worse than one that occasionally flashes past, so the
+ * padding is gone. Short fragments are instead merged upstream in
+ * `summarize`, and spans under 60m are dropped entirely.
+ */
 
 const TIER_TITLE: Record<ProtectedSpan["tier"], string> = {
   fullyProtected: "Protected bike lane",
@@ -64,7 +74,7 @@ export function buildAnnotations(
       // like a bug; describing what it is reads like information.
       detail: sp.name ?? "Separated path",
       atMeters: sp.startMeters,
-      untilMeters: Math.max(sp.endMeters, sp.startMeters + PROTECTED_MIN_VISIBLE_METERS),
+      untilMeters: sp.endMeters,
     });
   }
 

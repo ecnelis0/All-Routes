@@ -43,10 +43,18 @@ describe("buildAnnotations", () => {
     expect(unnamed.detail).not.toMatch(/unnamed|null|undefined/i);
   });
 
-  it("keeps a short protected lane on screen long enough to read", () => {
-    // The first span is only 65m; at tour speed that would flash past.
-    const short = anns.find((a) => a.atMeters === 1183)!;
-    expect(short.untilMeters - short.atMeters).toBeGreaterThanOrEqual(180);
+  it("never keeps a protected-lane callout on screen past the lane itself", () => {
+    // Callouts used to be padded to a 180m minimum so short lanes stayed
+    // readable, which made the caption outlive the lane: across every
+    // landmark pair, 9.9% of the positions where a protected-lane callout
+    // was showing had the rider already on a different street. A caption
+    // that is wrong one time in ten is worse than one that flashes past.
+    for (const a of anns) {
+      if (a.kind !== "protected") continue;
+      const span = PROTECTED.find((sp) => sp.startMeters === a.atMeters)!;
+      expect(a.untilMeters).toBe(span.endMeters);
+      expect(a.untilMeters).toBeLessThanOrEqual(span.endMeters);
+    }
   });
 
   it("does not pad a long lane beyond where it actually ends", () => {

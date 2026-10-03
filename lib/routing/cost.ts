@@ -27,15 +27,55 @@ export interface RouteProfile {
    * large detour always eventually loses to a short dangerous shortcut.
    */
   hardAvoidScore: number;
+  /**
+   * Refuse any edge inside a flagged neighbourhood.
+   *
+   * Area risk used to be only a feature, worth ~21 danger points for a
+   * SEVERE area at the baseline coefficient. Against a 1.5x weight that
+   * is easily outweighed by a shorter distance, so "Safer" routinely
+   * returned the identical path to "Fastest" and still crossed the
+   * Tenderloin. A profile that promises to avoid dangerous areas has to
+   * treat them as impassable, not as a mild surcharge.
+   */
+  avoidFlaggedAreas: boolean;
+  /** Multiply the cost of edges with no protected cycling infrastructure. */
+  unprotectedPenalty: number;
 }
 
 export const ROUTE_PROFILES: Record<RouteProfile["id"], RouteProfile> = {
   // Still bike-legal (the graph excludes motorways entirely) but indifferent
-  // to danger - this is the baseline the other two are compared against,
-  // and roughly what a conventional routing app returns.
-  fastest: { id: "fastest", label: "Fastest", safetyWeight: 0, hardAvoidScore: Infinity },
-  balanced: { id: "balanced", label: "Safer", safetyWeight: 1.5, hardAvoidScore: 92 },
-  safest: { id: "safest", label: "Safest", safetyWeight: 5, hardAvoidScore: 75 },
+  // to danger - the baseline the other two are compared against, and
+  // roughly what a conventional routing app returns.
+  fastest: {
+    id: "fastest",
+    label: "Fastest",
+    safetyWeight: 0,
+    hardAvoidScore: Infinity,
+    avoidFlaggedAreas: false,
+    unprotectedPenalty: 1,
+  },
+  // Avoids flagged neighbourhoods outright.
+  balanced: {
+    id: "balanced",
+    label: "Safest",
+    safetyWeight: 2,
+    hardAvoidScore: 88,
+    avoidFlaggedAreas: true,
+    unprotectedPenalty: 1,
+  },
+  // Same hard avoidance, and actively prefers protected infrastructure.
+  safest: {
+    id: "safest",
+    label: "Safest + bike lanes",
+    safetyWeight: 4,
+    hardAvoidScore: 80,
+    avoidFlaggedAreas: true,
+    // Expressed as a penalty on unprotected roads rather than a discount
+    // on protected ones: A*'s straight-line heuristic is only admissible
+    // while no edge costs less than its true length, so preferences must
+    // be penalties, never bonuses.
+    unprotectedPenalty: 1.9,
+  },
 };
 
 /**
@@ -46,8 +86,13 @@ export const ROUTE_PROFILES: Record<RouteProfile["id"], RouteProfile> = {
 export function edgeCost(
   edge: GraphEdge,
   score: number,
-  profile: RouteProfile
+  profile: RouteProfile,
+  inFlaggedArea = false
 ): number {
   if (score >= profile.hardAvoidScore) return Infinity;
-  return edge.lengthMeters * (1 + profile.safetyWeight * (score / 100));
+  if (profile.avoidFlaggedAreas && inFlaggedArea) return Infinity;
+
+  const protectedTier = edge.tier === "fullyProtected" || edge.tier === "semiProtected";
+  const laneFactor = protectedTier ? 1 : profile.unprotectedPenalty;
+  return edge.lengthMeters * (1 + profile.safetyWeight * (score / 100)) * laneFactor;
 }

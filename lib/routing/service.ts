@@ -50,6 +50,8 @@ export interface RoutingEngine {
   highwaySegmentCount: number;
   /** Outcome of reconciling OSM tags against SFMTA's official bikeway network. */
   laneMatch: LaneMatchStats;
+  /** Per-edge: does this edge's midpoint sit inside a flagged neighbourhood? */
+  inFlaggedArea: Uint8Array;
 }
 
 let engine: RoutingEngine | null = null;
@@ -132,8 +134,20 @@ export function getRoutingEngine(): RoutingEngine {
     if (inDegree[e.to] < 65535) inDegree[e.to]++;
   }
 
+  // Precomputed once: which edges lie inside a flagged neighbourhood.
+  // The safer profiles refuse these outright, so this has to be a cheap
+  // array lookup inside the A* inner loop rather than a geometry test.
+  const inFlaggedArea = new Uint8Array(graph.edges.length);
+  for (const edge of graph.edges) {
+    const a = graph.nodes[edge.from];
+    const b = graph.nodes[edge.to];
+    const mid = { lat: (a.lat + b.lat) / 2, lng: (a.lng + b.lng) / 2 };
+    if (areasContaining(mid, SF_DANGEROUS_NEIGHBORHOODS).length > 0) inFlaggedArea[edge.id] = 1;
+  }
+
   engine = {
     graph,
+    inFlaggedArea,
     outDegree,
     inDegree,
     index: new NodeSpatialIndex(graph.nodes),
@@ -198,13 +212,19 @@ export interface RouteSummary {
     endMeters: number;
   }[];
   /**
-   * Flagged neighbourhoods the route passes close to but never enters,
-   * with where along the route the closest approach happens.
+   * Flagged neighbourhoods THE FASTEST ROUTE GOES THROUGH that this one
+   * does not.
    *
-   * This is the positive claim the app exists to make - "we took you
-   * round that" - and it can only be made about areas the route genuinely
-   * came near. An area on the far side of the city was not avoided in any
-   * meaningful sense, so `NEAR_MISS_RADIUS_METERS` bounds it.
+   * Counterfactual, deliberately. An earlier version reported any flagged
+   * area within 900m that the route did not enter, which meant all three
+   * profiles - including `fastest`, which avoids nothing by design -
+   * claimed credit for "avoiding" the Tenderloin on trips that were never
+   * going near it. Crediting avoidance the routing did not perform is
+   * worse than saying nothing: it makes the one number a rider might
+   * actually trust meaningless.
+   *
+   * Always empty for `fastest`, which is the baseline and cannot avoid
+   * anything relative to itself.
    */
   avoidedNearby: { name: string; atMeters: number; closestMeters: number }[];
   /**
@@ -215,7 +235,16 @@ export interface RouteSummary {
    * per-street vehicle counts exist for San Francisco.
    */
   classSpans: { roadClass: string; startMeters: number; endMeters: number }[];
+  /**
+   * Set when this profile costs materially more distance than the fastest
+   * route, so the UI can say so rather than quietly handing someone a
+   * much longer ride. Null on the fastest route and on modest detours.
+   */
+  detourWarning: { extraPercent: number; extraMeters: number; message: string } | null;
 }
+
+/** Above this much extra distance versus the fastest route, say so plainly. */
+const DETOUR_WARN_THRESHOLD = 0.5;
 
 /**
  * How close a route must pass to a flagged area for skirting it to count
@@ -246,7 +275,11 @@ function summarize(
   route: RoutePath,
   scores: Float32Array,
   profile: RouteProfile,
-  nodes: LatLng[]
+  nodes: LatLng[],
+  /** Areas the baseline route enters; avoidance is claimed only against these. */
+  baselineEntered: Set<string> = new Set(),
+  /** Fastest route's length, for the detour warning. Zero on the baseline itself. */
+  baselineMeters = 0
 ): RouteSummary {
   const tierBreakdown: Record<BikeLaneTier, number> = {
     fullyProtected: 0,
@@ -279,7 +312,14 @@ function summarize(
       // street has not changed - OSM splits a single street into many
       // edges, and one span per edge would make the label flicker every
       // few metres.
-      if (last && last.name === e.name) last.endMeters = travelled + e.lengthMeters;
+      //
+      // The contiguity check matters: without it a route that returns to
+      // an earlier street (A -> B -> A, common with one-way pairs) merged
+      // the second visit into the FIRST span, so that span swallowed B's
+      // range entirely and the tour captioned B's blocks with A's name.
+      if (last && last.name === e.name && Math.abs(last.endMeters - travelled) < 1) {
+        last.endMeters = travelled + e.lengthMeters;
+      }
       else
         streetSpans.push({
           name: e.name,
@@ -287,7 +327,6 @@ function summarize(
           endMeters: travelled + e.lengthMeters,
         });
     }
-    travelled += e.lengthMeters;
 
     // Attributed by edge midpoint - an edge is counted as wholly inside or
     // wholly outside. At SF block scale (~100m edges against 400m+ areas)
@@ -326,11 +365,19 @@ function summarize(
 
     if (e.tier === "fullyProtected" || e.tier === "semiProtected") {
       const last = protectedSpans[protectedSpans.length - 1];
-      // Merge consecutive protected edges of the same tier so one lane
-      // reads as one callout rather than dozens of OSM fragments.
-      if (last && last.tier === e.tier && Math.abs(last.endMeters - travelled) < 1) {
+      // Merge consecutive protected edges of the same tier AND the same
+      // name, so one lane reads as one callout rather than dozens of OSM
+      // fragments - but never across a name change. Merging on tier alone
+      // let a span that began on "Sloat Boulevard" run on into "Sloat Blvd
+      // bikeway" while still captioned with the first name, so the banner
+      // named a street the rider had already left.
+      if (
+        last &&
+        last.tier === e.tier &&
+        last.name === e.name &&
+        Math.abs(last.endMeters - travelled) < 1
+      ) {
         last.endMeters = travelled + e.lengthMeters;
-        if (!last.name && e.name) last.name = e.name;
       } else {
         protectedSpans.push({
           tier: e.tier,
@@ -340,6 +387,16 @@ function summarize(
         });
       }
     }
+
+    // MUST be the last statement in the loop. It used to sit just after
+    // the streetSpans block, which meant everything computed below it -
+    // protectedSpans, classSpans and the per-area closest approach - was
+    // offset by one edge length. On the ground that put a protected-lane
+    // callout ~58m past the point where the street name changed, so the
+    // tour captioned "Oak Street" while the rider was already on the Oak
+    // Street Cyclepath, and in the worst cases named an entirely
+    // different road.
+    travelled += e.lengthMeters;
   }
 
   const dist = Math.max(1, route.distanceMeters);
@@ -374,13 +431,33 @@ function summarize(
         startMeters: Math.round(sp.startMeters),
         endMeters: Math.round(sp.endMeters),
       })),
+    detourWarning:
+      baselineMeters > 0 && route.distanceMeters > baselineMeters * (1 + DETOUR_WARN_THRESHOLD)
+        ? {
+            extraPercent:
+              Math.round(((route.distanceMeters - baselineMeters) / baselineMeters) * 1000) / 10,
+            extraMeters: Math.round(route.distanceMeters - baselineMeters),
+            message: `This route is ${Math.round(
+              ((route.distanceMeters - baselineMeters) / baselineMeters) * 100
+            )}% longer than the fastest route (${(
+              (route.distanceMeters - baselineMeters) / 1609.34
+            ).toFixed(1)} mi further) to stay clear of flagged areas and keep to protected lanes.`,
+          }
+        : null,
     classSpans: classSpans.map((c) => ({
       roadClass: c.roadClass,
       startMeters: Math.round(c.startMeters),
       endMeters: Math.round(c.endMeters),
     })),
     avoidedNearby: [...closest.entries()]
-      .filter(([name, c]) => !entered.has(name) && c.closestMeters <= NEAR_MISS_RADIUS_METERS)
+      .filter(
+        ([name, c]) =>
+          // Not entered by us, DID get entered by the baseline, and close
+          // enough that steering round it was a real routing decision.
+          !entered.has(name) &&
+          baselineEntered.has(name) &&
+          c.closestMeters <= NEAR_MISS_RADIUS_METERS
+      )
       .map(([name, c]) => ({
         name,
         atMeters: Math.round(c.atMeters),
@@ -424,10 +501,16 @@ export function planRoutes(origin: LatLng, destination: LatLng): RouteSummary[] 
 
   const scoreOf = (edgeId: number) => eng.scores[edgeId];
   const out: RouteSummary[] = [];
+  // The fastest route is computed first and becomes the baseline every
+  // other profile's avoidance claims are measured against.
+  let baselineEntered = new Set<string>();
+  let baselineMeters = 0;
 
   for (const id of ["fastest", "balanced", "safest"] as const) {
     const profile = ROUTE_PROFILES[id];
-    let route = findRoute(eng.graph, scoreOf, startNode, goalNode, profile);
+    const inFlagged = (edgeId: number) => eng.inFlaggedArea[edgeId] === 1;
+    let route = findRoute(eng.graph, scoreOf, startNode, goalNode, profile, { inFlaggedArea: inFlagged });
+    let bestEffort = false;
 
     // A strict profile can cut the graph into disconnected pieces - if every
     // road out of a neighbourhood scores above `hardAvoidScore`, there is
@@ -435,18 +518,45 @@ export function planRoutes(origin: LatLng, destination: LatLng): RouteSummary[] 
     // beats returning nothing, but the caller should be able to tell, hence
     // the distinct label.
     if (!route && id !== "fastest") {
-      const relaxed: RouteProfile = { ...profile, hardAvoidScore: Infinity };
-      route = findRoute(eng.graph, scoreOf, startNode, goalNode, relaxed);
+      // Hard avoidance can make the goal unreachable - the destination
+      // may itself be inside a flagged area, which is common and
+      // perfectly legitimate. Relax in stages so the answer degrades
+      // rather than disappearing, and say so in the label.
+      const stages: RouteProfile[] = [
+        { ...profile, avoidFlaggedAreas: false },
+        { ...profile, avoidFlaggedAreas: false, hardAvoidScore: Infinity },
+      ];
+      for (const relaxed of stages) {
+        route = findRoute(eng.graph, scoreOf, startNode, goalNode, relaxed, {
+          inFlaggedArea: inFlagged,
+        });
+        if (route) break;
+      }
+      bestEffort = Boolean(route);
       if (route) {
         out.push({
-          ...summarize(route, eng.scores, profile, eng.graph.nodes),
-          label: `${profile.label} (no fully-qualifying route; best effort)`,
+          ...summarize(route, eng.scores, profile, eng.graph.nodes, baselineEntered, baselineMeters),
+          label: `${profile.label} (best effort - could not clear every flagged area)`,
         });
         continue;
       }
     }
 
-    if (route) out.push(summarize(route, eng.scores, profile, eng.graph.nodes));
+    if (route) {
+      const summary = summarize(
+        route,
+        eng.scores,
+        profile,
+        eng.graph.nodes,
+        baselineEntered,
+        baselineMeters
+      );
+      if (id === "fastest") {
+        baselineEntered = new Set(summary.neighborhoodsEntered.map((n) => n.name));
+        baselineMeters = summary.distanceMeters;
+      }
+      out.push(summary);
+    }
   }
 
   if (out.length === 0) {
@@ -483,7 +593,16 @@ function enforceSafetyOrdering(routes: RouteSummary[]): RouteSummary[] {
     const stricter = byProfile.get(order[i]);
     const laxer = byProfile.get(order[i - 1]);
     if (!stricter || !laxer) continue;
-    if (laxer.meanDanger < stricter.meanDanger) {
+    // Compare on BOTH promises, not just mean danger. Once the safer
+    // profiles hard-avoid flagged areas, their route is often longer and
+    // pushed onto arterials, so its mean danger can edge above the
+    // fastest route's - and ordering on that number alone silently threw
+    // the avoidance away and handed back the fastest route under a
+    // "Safest" label. A laxer tier only wins if it is better on danger
+    // AND spends no more of the ride inside flagged areas.
+    const laxerShare = laxer.metersInFlaggedAreas / Math.max(1, laxer.distanceMeters);
+    const stricterShare = stricter.metersInFlaggedAreas / Math.max(1, stricter.distanceMeters);
+    if (laxer.meanDanger < stricter.meanDanger && laxerShare <= stricterShare) {
       byProfile.set(order[i], {
         ...laxer,
         profile: stricter.profile,
