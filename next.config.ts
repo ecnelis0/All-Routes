@@ -5,7 +5,11 @@ const nextConfig: NextConfig = {
   // treats 127.0.0.1 as a different origin from localhost. Hitting the dev
   // server by IP - which scripts/renderTour.mjs and most local tooling
   // does - otherwise warns on every page load and blocks HMR.
-  allowedDevOrigins: ["127.0.0.1"],
+  //
+  // The tunnel domains are for testing live GPS on a phone: geolocation
+  // only works on https, and a tunnel is the simplest way to give the dev
+  // server a trusted https URL (see README "Testing GPS on a phone").
+  allowedDevOrigins: ["127.0.0.1", "*.trycloudflare.com", "*.ngrok-free.app"],
 };
 
 export default nextConfig;

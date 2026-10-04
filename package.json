@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "npm run prepare-assets && next dev",
+    "dev:https": "npm run prepare-assets && next dev --experimental-https",
     "build": "npm run prepare-assets && next build",
     "start": "next start",
     "lint": "eslint",
