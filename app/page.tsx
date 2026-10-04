@@ -7,12 +7,14 @@ import AddressSearch from "@/components/AddressSearch";
 import MapView from "@/components/MapView";
 // Loaded lazily: maplibre-gl is ~900KB and only needed when a tour opens.
 const Route3DTour = dynamic(() => import("@/components/Route3DTour"), { ssr: false });
+const NavigationView = dynamic(() => import("@/components/NavigationView"), { ssr: false });
 import {
   SF_DANGEROUS_NEIGHBORHOODS,
   neighborhoodRiskColor,
   neighborhoodRiskLabel,
 } from "@/lib/data/sfDangerousNeighborhoods";
 import { DEMO_CITY } from "@/lib/mockData";
+import { buildManeuvers, formatDistance } from "@/lib/nav/instructions";
 import type { RouteSummary } from "@/lib/routing/service";
 import type {
   BikeLaneSegment,
@@ -113,6 +115,7 @@ export default function Home() {
   const [avoidElevation, setAvoidElevation] = useState(false);
   const [fewerSignals, setFewerSignals] = useState(false);
   const [tourOpen, setTourOpen] = useState(false);
+  const [navSource, setNavSource] = useState<"gps" | "simulate" | null>(null);
   const [computingSafer, setComputingSafer] = useState(false);
   const [routingError, setRoutingError] = useState<string | null>(null);
 
@@ -613,22 +616,33 @@ export default function Home() {
             <h2 className="text-xs font-semibold uppercase tracking-wide text-black">
               Route overview
             </h2>
-            {/*
-              Street-by-street rather than turn-by-turn. Real turn
-              instructions ("turn left onto Valencia") need bearing changes
-              computed at each node plus street-name transitions; the old
-              version got them free from Google's Directions API, which this
-              project can no longer call. Listing the streets in order is
-              honest about what we actually know and still orients a rider.
-            */}
-            <ol className="flex flex-col gap-1.5 text-xs text-black">
-              {activeRoute.streets.map((street, i) => (
-                <li key={`${street}-${i}`} className="flex gap-2 border-b border-slate-100 pb-1.5 last:border-0">
-                  <span className="font-semibold text-black">{i + 1}.</span>
-                  <span>{street}</span>
-                </li>
-              ))}
+            <ol className="flex flex-col gap-1.5 text-xs text-black" data-testid="turn-list">
+              {buildManeuvers(activeRoute.path, activeRoute.streetSpans).map((m, i, all) => {
+                const leg = (all[i + 1]?.atMeters ?? m.atMeters) - m.atMeters;
+                return (
+                  <li key={`${m.atMeters}-${i}`} className="flex justify-between gap-2 border-b border-slate-100 pb-1.5 last:border-0">
+                    <span>{m.text}</span>
+                    {leg > 0 && <span className="shrink-0 text-black/50">{formatDistance(leg)}</span>}
+                  </li>
+                );
+              })}
             </ol>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setNavSource("gps")}
+                className="flex-1 rounded-md bg-emerald-700 px-3 py-2 text-sm font-semibold text-white"
+              >
+                Start navigation
+              </button>
+              <button
+                type="button"
+                onClick={() => setNavSource("simulate")}
+                className="rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-black hover:bg-slate-50"
+              >
+                Simulate ride
+              </button>
+            </div>
             {activeRoute.streets.length === 0 && (
               <p className="text-xs text-black/60">
                 This route runs mostly on unnamed paths and connectors.
@@ -659,6 +673,16 @@ export default function Home() {
             protectedSpans={activeRoute.protectedSpans}
             avoidedNearby={activeRoute.avoidedNearby}
             onClose={() => setTourOpen(false)}
+          />
+        )}
+        {navSource && activeRoute && destination && (
+          <NavigationView
+            route={activeRoute}
+            destination={destination}
+            source={navSource}
+            avoidElevation={avoidElevation}
+            fewerSignals={fewerSignals}
+            onExit={() => setNavSource(null)}
           />
         )}
       </main>
