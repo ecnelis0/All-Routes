@@ -78,10 +78,15 @@ export function findRoute(
   startNode: number,
   goalNode: number,
   profile: RouteProfile,
-  opts: { maxExpansions?: number; inFlaggedArea?: (edgeId: number) => boolean } = {}
+  opts: {
+    maxExpansions?: number;
+    inFlaggedArea?: (edgeId: number) => boolean;
+    elevationPenalty?: (edgeId: number) => number;
+  } = {}
 ): RoutePath | null {
   const maxExpansions = opts.maxExpansions ?? 400_000;
   const inFlagged = opts.inFlaggedArea ?? (() => false);
+  const elevPenalty = opts.elevationPenalty ?? (() => 0);
   const n = graph.nodes.length;
   const goal = graph.nodes[goalNode];
 
@@ -107,7 +112,7 @@ export function findRoute(
       const edge = graph.edges[edgeId];
       if (closed[edge.to]) continue;
 
-      const cost = edgeCost(edge, scoreOf(edgeId), profile, inFlagged(edgeId));
+      const cost = edgeCost(edge, scoreOf(edgeId), profile, inFlagged(edgeId), elevPenalty(edgeId));
       // Pure optimization, not a correctness guard: an Infinite cost makes
       // `tentative` Infinite, and `Infinity < Infinity` is already false, so
       // the relaxation below would reject the edge anyway.

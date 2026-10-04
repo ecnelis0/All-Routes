@@ -39,7 +39,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Request body must be JSON." }, { status: 400 });
   }
 
-  const { origin, destination } = (body ?? {}) as Record<string, unknown>;
+  const { origin, destination, avoidElevation } = (body ?? {}) as Record<string, unknown>;
   if (!isLatLng(origin) || !isLatLng(destination)) {
     return NextResponse.json(
       { error: "Both `origin` and `destination` must be {lat, lng} numbers." },
@@ -49,7 +49,7 @@ export async function POST(request: Request) {
 
   try {
     const started = Date.now();
-    const routes = planRoutes(origin, destination);
+    const routes = planRoutes(origin, destination, { avoidElevation: avoidElevation === true });
     const engine = getRoutingEngine();
     return NextResponse.json({
       routes,

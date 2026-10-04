@@ -39,10 +39,13 @@ interface LayersResponse {
 
 // The 3 route choices, in the order they're revealed: Google's own route
 // resolves first (near-instant), then the two safety tiers stream in after.
-const ROUTE_TABS: { kind: RouteProfileId; label: string }[] = [
-  { kind: "fastest", label: "Fastest" },
-  { kind: "balanced", label: "Safer" },
-  { kind: "safest", label: "Safest" },
+// Labels mirror ROUTE_PROFILES in lib/routing/cost.ts. The route itself
+// carries its label too (with "best effort" appended when hard avoidance
+// had to be relaxed), and that takes precedence when shown.
+const ROUTE_TABS: { kind: RouteProfileId; label: string; hint: string }[] = [
+  { kind: "fastest", label: "Fastest", hint: "Shortest legal bike route" },
+  { kind: "balanced", label: "Safest", hint: "Avoids every flagged area" },
+  { kind: "safest", label: "Safest + bike lanes", hint: "Also keeps to protected lanes" },
 ];
 
 function metersToMiles(m: number): string {
@@ -107,6 +110,7 @@ export default function Home() {
   const [destinationText, setDestinationText] = useState("");
   const [modelMeta, setModelMeta] = useState<{ modelSource: string; modelVersion: string } | null>(null);
   const [confirmed, setConfirmed] = useState(false);
+  const [avoidElevation, setAvoidElevation] = useState(false);
   const [tourOpen, setTourOpen] = useState(false);
   const [computingSafer, setComputingSafer] = useState(false);
   const [routingError, setRoutingError] = useState<string | null>(null);
@@ -164,7 +168,7 @@ export default function Home() {
    * client sends two points and receives three finished routes - see
    * app/api/route/route.ts.
    */
-  async function startRouteSearch(from: LatLng, to: LatLng) {
+  async function startRouteSearch(from: LatLng, to: LatLng, hills = avoidElevation) {
     const requestId = ++routeRequestIdRef.current;
     setRoutes({});
     setSelectedRouteKind("fastest");
@@ -180,7 +184,7 @@ export default function Home() {
       const res = await fetch("/api/route", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ origin: from, destination: to }),
+        body: JSON.stringify({ origin: from, destination: to, avoidElevation: hills }),
       });
       const json = (await res.json()) as {
         routes?: RouteSummary[];
@@ -221,6 +225,18 @@ export default function Home() {
     setDestination(value);
     resetRouteState();
     if (origin && value) void startRouteSearch(origin, value);
+  }
+
+  function toggleAvoidElevation() {
+    const next = !avoidElevation;
+    setAvoidElevation(next);
+    // Pass the new value explicitly: state set above is not visible until
+    // the next render, so reading it inside startRouteSearch would re-plan
+    // with the OLD setting.
+    if (origin && destination) {
+      resetRouteState();
+      void startRouteSearch(origin, destination, next);
+    }
   }
 
   function selectRouteTab(kind: RouteProfileId) {
@@ -285,6 +301,19 @@ export default function Home() {
         </section>
 
         <section className="flex flex-col gap-1.5">
+          <button
+            type="button"
+            onClick={toggleAvoidElevation}
+            aria-pressed={avoidElevation}
+            className={`flex items-center justify-between rounded-md border px-3 py-1.5 text-left text-sm transition-colors ${
+              avoidElevation
+                ? "border-emerald-600 bg-emerald-50 text-black"
+                : "border-slate-200 bg-white text-black hover:bg-slate-50"
+            }`}
+          >
+            <span className="font-medium">Avoid hills</span>
+            <span className="text-[11px] text-black">{avoidElevation ? "On" : "Off"}</span>
+          </button>
           <button
             type="button"
             onClick={() => setShowNeighborhoodView((v) => !v)}
@@ -363,7 +392,10 @@ export default function Home() {
                         : "border-slate-200 bg-white text-black hover:bg-slate-50"
                     } disabled:cursor-not-allowed disabled:opacity-50`}
                   >
-                    <span className="font-medium">{tab.label}</span>
+                    <span className="flex flex-col">
+                      <span className="font-medium">{route?.label ?? tab.label}</span>
+                      <span className="text-[10px] text-black/55">{tab.hint}</span>
+                    </span>
                     <span className="text-[11px] text-black">
                       {route
                         ? `${metersToMiles(route.distanceMeters)} mi \u00b7 ~${estimateMinutes(route.distanceMeters)} min`
@@ -407,6 +439,20 @@ export default function Home() {
                   </span>
                 </div>
                 <div className="flex justify-between">
+                  <span>Elevation gain</span>
+                  <span className="font-medium">
+                    {Math.round(activeRoute.elevationGainMeters * 3.281)} ft
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span>Steepest climb</span>
+                  <span
+                    className={`font-medium ${activeRoute.maxGradePercent >= 12 ? "text-red-600" : ""}`}
+                  >
+                    {activeRoute.maxGradePercent}%
+                  </span>
+                </div>
+                <div className="flex justify-between">
                   <span>Inside flagged areas</span>
                   <span className="font-medium">
                     {metersToMiles(activeRoute.metersInFlaggedAreas)} mi (
@@ -417,6 +463,36 @@ export default function Home() {
                     %)
                   </span>
                 </div>
+
+                {activeRoute.detourWarning && (
+                  <p
+                    role="note"
+                    className="mt-1 rounded-md border border-amber-300 bg-amber-50 px-2 py-1.5 leading-snug text-amber-900"
+                  >
+                    {activeRoute.detourWarning.message}
+                  </p>
+                )}
+
+                {activeRoute.steepClimbs.length > 0 && (
+                  <div className="mt-1 flex flex-col gap-0.5 border-t border-slate-200 pt-1.5">
+                    <span className="font-semibold">Hard climbs on this route</span>
+                    <ul className="list-disc pl-4">
+                      {activeRoute.steepClimbs.slice(0, 4).map((c) => (
+                        <li key={`${c.name}-${c.severity}`}>
+                          {c.name}{" "}
+                          <span className="text-black/60">
+                            ({c.severity.toLowerCase()}, {Math.round(c.meters * 3.281)} ft)
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                    {!avoidElevation && (
+                      <span className="text-[11px] text-black/60">
+                        Turn on &ldquo;Avoid hills&rdquo; to route around these where possible.
+                      </span>
+                    )}
+                  </div>
+                )}
 
                 {selectedRouteKind !== "fastest" && routes.fastest && (
                   <p className="mt-1 font-medium">

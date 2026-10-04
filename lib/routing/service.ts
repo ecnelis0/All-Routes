@@ -13,6 +13,15 @@ import { decodeGraph, NodeSpatialIndex, type BikeGraph } from "./graph";
 import { findRoute, type RoutePath } from "./astar";
 import { ROUTE_PROFILES, type RouteProfile } from "./cost";
 import rawGraph from "../data/sfBikeGraph.json";
+import rawElevation from "../data/sfNodeElevation.json";
+import {
+  SEVERITY_MULTIPLIER,
+  SF_STEEP_AREAS,
+  SF_STEEP_STREETS,
+  STEEP_GRADE_THRESHOLD,
+  type SteepArea,
+  type SteepSeverity,
+} from "../data/sfSteepAreas";
 import {
   SF_DANGEROUS_NEIGHBORHOODS,
   type DangerousNeighborhood,
@@ -52,6 +61,67 @@ export interface RoutingEngine {
   laneMatch: LaneMatchStats;
   /** Per-edge: does this edge's midpoint sit inside a flagged neighbourhood? */
   inFlaggedArea: Uint8Array;
+  /** Per directed edge: metres climbed travelling from `from` to `to` (negative = descent). */
+  climbMeters: Float32Array;
+  /**
+   * Per directed edge: extra effective metres charged for climbing it when
+   * "avoid elevation" is on. Precomputed so the A* inner loop pays an
+   * array lookup, not geometry and list matching.
+   */
+  elevationPenalty: Float32Array;
+  /** Per directed edge: the listed severity this edge triggered, if any. */
+  steepSeverity: (SteepSeverity | null)[];
+}
+
+/**
+ * Flat-equivalent metres charged per metre climbed when avoiding
+ * elevation. Deliberately above the 8-12m cycling rule of thumb for
+ * effort: this mode is opt-in, and a rider who switches on "avoid hills"
+ * wants hills avoided, not merely discounted. Swept across four hilly
+ * trips: at 10 the aggregate climbing fell 25% but individual routes like
+ * Marina Green -> Union Square kept a 13.4% block; at 25 climbing falls
+ * 30%, that block becomes 6.5%, and aggregate distance does not grow at
+ * all (the safest profile stops taking quiet-but-steep detours). Severity
+ * from the owner's list multiplies this on top.
+ */
+const CLIMB_COST_PER_METRE = 25;
+/**
+ * Above this grade a block is a wall many riders walk. Charged an extra
+ * flat-equivalent cost per metre of length on top of the climb penalty,
+ * rather than made impassable, so a destination that genuinely sits at
+ * the top of one is still reachable.
+ */
+const WALL_GRADE = 0.15;
+const WALL_COST_PER_METRE = 25;
+/**
+ * Grade above which a climb is charged superlinearly. A 15% wall is not
+ * merely twice as bad as a 7.5% incline for a cyclist - past roughly 8%
+ * many riders have to walk.
+ */
+const STEEP_SURCHARGE_GRADE = 0.08;
+/**
+ * Edges shorter than this get their grade taken from a smoothed estimate
+ * rather than trusted directly: at ~10m DEM resolution a 6m OSM fragment
+ * can show 20% from interpolation noise alone.
+ */
+const MIN_EDGE_FOR_GRADE_METERS = 15;
+
+function steepAreaAt(p: LatLng, areas: SteepArea[]): SteepArea | null {
+  let worst: SteepArea | null = null;
+  for (const a of areas) {
+    const dLat = (p.lat - a.center.lat) * 111_320;
+    const dLng = (p.lng - a.center.lng) * 111_320 * Math.cos((p.lat * Math.PI) / 180);
+    if (Math.sqrt(dLat * dLat + dLng * dLng) > a.radiusMeters) continue;
+    if (!worst || SEVERITY_MULTIPLIER[a.severity] > SEVERITY_MULTIPLIER[worst.severity]) worst = a;
+  }
+  return worst;
+}
+
+interface ElevationFile {
+  format: string;
+  graphGeneratedAt: string;
+  nodeCount: number;
+  elevDm: number[];
 }
 
 let engine: RoutingEngine | null = null;
@@ -145,8 +215,58 @@ export function getRoutingEngine(): RoutingEngine {
     if (areasContaining(mid, SF_DANGEROUS_NEIGHBORHOODS).length > 0) inFlaggedArea[edge.id] = 1;
   }
 
+  // ELEVATION. Heights are per node index, which is positional, so a
+  // regenerated graph would silently pair streets with the wrong heights.
+  // Refuse rather than mis-route - same rule as the model artifact.
+  const elev = rawElevation as ElevationFile;
+  if (elev.graphGeneratedAt !== graph.generatedAt || elev.nodeCount !== graph.nodes.length) {
+    throw new Error(
+      `Elevation data was sampled for a different graph (${elev.graphGeneratedAt}, ` +
+        `${elev.nodeCount} nodes) than the one loaded (${graph.generatedAt}, ` +
+        `${graph.nodes.length} nodes). Re-run: npm run data:fetch-elevation`
+    );
+  }
+  const climbMeters = new Float32Array(graph.edges.length);
+  const elevationPenalty = new Float32Array(graph.edges.length);
+  const steepSeverity: (SteepSeverity | null)[] = new Array(graph.edges.length).fill(null);
+  for (const edge of graph.edges) {
+    const climb = (elev.elevDm[edge.to] - elev.elevDm[edge.from]) / 10;
+    climbMeters[edge.id] = climb;
+    if (climb <= 0) continue;
+
+    // Grade, with short fragments clamped so DEM interpolation noise on a
+    // 6m sliver cannot masquerade as a 20% wall.
+    const run = Math.max(edge.lengthMeters, MIN_EDGE_FOR_GRADE_METERS);
+    const grade = climb / run;
+
+    // Severity from the owner's list - but only where the terrain confirms
+    // the block is genuinely steep. Flat 24th Street in the Mission is
+    // never penalised however it is named.
+    let sev: SteepSeverity | null = null;
+    if (grade >= STEEP_GRADE_THRESHOLD) {
+      const byStreet = edge.name ? SF_STEEP_STREETS[edge.name] : undefined;
+      const a = graph.nodes[edge.from];
+      const b = graph.nodes[edge.to];
+      const area = steepAreaAt({ lat: (a.lat + b.lat) / 2, lng: (a.lng + b.lng) / 2 }, SF_STEEP_AREAS);
+      const candidates = [byStreet, area?.severity].filter(Boolean) as SteepSeverity[];
+      for (const c of candidates) {
+        if (!sev || SEVERITY_MULTIPLIER[c] > SEVERITY_MULTIPLIER[sev]) sev = c;
+      }
+    }
+    steepSeverity[edge.id] = sev;
+
+    const steepFactor = grade > STEEP_SURCHARGE_GRADE ? 1 + (grade - STEEP_SURCHARGE_GRADE) * 25 : 1;
+    const listFactor = sev ? SEVERITY_MULTIPLIER[sev] : 1;
+    elevationPenalty[edge.id] =
+      climb * CLIMB_COST_PER_METRE * steepFactor * listFactor +
+      (grade > WALL_GRADE ? edge.lengthMeters * WALL_COST_PER_METRE : 0);
+  }
+
   engine = {
     graph,
+    climbMeters,
+    elevationPenalty,
+    steepSeverity,
     inFlaggedArea,
     outDegree,
     inDegree,
@@ -241,6 +361,17 @@ export interface RouteSummary {
    * much longer ride. Null on the fastest route and on modest detours.
    */
   detourWarning: { extraPercent: number; extraMeters: number; message: string } | null;
+  /** Total metres climbed along the route - the "elevation gain" a rider feels. */
+  elevationGainMeters: number;
+  /** Steepest climbing block on the route, as a percentage grade. */
+  maxGradePercent: number;
+  /**
+   * Stretches the route climbs that the owner's steep list flags, merged by
+   * street and severity, so the UI can name the hard parts.
+   */
+  steepClimbs: { name: string; severity: SteepSeverity; meters: number }[];
+  /** Whether this route was planned with "avoid elevation" on. */
+  avoidedElevation: boolean;
 }
 
 /** Above this much extra distance versus the fastest route, say so plainly. */
@@ -279,7 +410,12 @@ function summarize(
   /** Areas the baseline route enters; avoidance is claimed only against these. */
   baselineEntered: Set<string> = new Set(),
   /** Fastest route's length, for the detour warning. Zero on the baseline itself. */
-  baselineMeters = 0
+  baselineMeters = 0,
+  elevation: {
+    climbMeters: Float32Array;
+    steepSeverity: (SteepSeverity | null)[];
+    avoidElevation: boolean;
+  } | null = null
 ): RouteSummary {
   const tierBreakdown: Record<BikeLaneTier, number> = {
     fullyProtected: 0,
@@ -296,6 +432,9 @@ function summarize(
   const closest = new Map<string, { closestMeters: number; atMeters: number }>();
   const protectedSpans: RouteSummary["protectedSpans"] = [];
   const classSpans: RouteSummary["classSpans"] = [];
+  let gain = 0;
+  let maxGrade = 0;
+  const steep = new Map<string, number>();
   let metersInFlaggedAreas = 0;
   let travelled = 0;
 
@@ -388,6 +527,21 @@ function summarize(
       }
     }
 
+    if (elevation) {
+      const climb = elevation.climbMeters[e.id];
+      if (climb > 0) {
+        gain += climb;
+        // Ignore grades on very short fragments: at ~10m DEM resolution a
+        // few-metre sliver can read as a wall from interpolation alone.
+        if (e.lengthMeters >= 25) maxGrade = Math.max(maxGrade, climb / e.lengthMeters);
+        const sev = elevation.steepSeverity[e.id];
+        if (sev) {
+          const key = `${e.name ?? "Unnamed climb"}|${sev}`;
+          steep.set(key, (steep.get(key) ?? 0) + e.lengthMeters);
+        }
+      }
+    }
+
     // MUST be the last statement in the loop. It used to sit just after
     // the streetSpans block, which meant everything computed below it -
     // protectedSpans, classSpans and the per-area closest approach - was
@@ -431,6 +585,19 @@ function summarize(
         startMeters: Math.round(sp.startMeters),
         endMeters: Math.round(sp.endMeters),
       })),
+    elevationGainMeters: Math.round(gain),
+    maxGradePercent: Math.round(maxGrade * 1000) / 10,
+    steepClimbs: [...steep.entries()]
+      .map(([key, meters]) => {
+        const [name, severity] = key.split("|");
+        return { name, severity: severity as SteepSeverity, meters: Math.round(meters) };
+      })
+      .filter((c) => c.meters >= 30)
+      .sort(
+        (x, y) =>
+          SEVERITY_MULTIPLIER[y.severity] - SEVERITY_MULTIPLIER[x.severity] || y.meters - x.meters
+      ),
+    avoidedElevation: elevation?.avoidElevation ?? false,
     detourWarning:
       baselineMeters > 0 && route.distanceMeters > baselineMeters * (1 + DETOUR_WARN_THRESHOLD)
         ? {
@@ -478,7 +645,22 @@ export class RoutingError extends Error {}
  * nudging approach was, but genuinely the lowest-danger path the network
  * admits.
  */
-export function planRoutes(origin: LatLng, destination: LatLng): RouteSummary[] {
+export interface PlanOptions {
+  /**
+   * Charge for climbing on every profile, so routes go around hills where
+   * a reasonable detour exists. Off by default: in a city this hilly it
+   * reshapes almost every route, and a rider who is fine with climbs
+   * should not pay detours for it.
+   */
+  avoidElevation?: boolean;
+}
+
+export function planRoutes(
+  origin: LatLng,
+  destination: LatLng,
+  options: PlanOptions = {}
+): RouteSummary[] {
+  const avoidElevation = options.avoidElevation ?? false;
   const eng = getRoutingEngine();
 
   // Snap to nodes that can actually serve as an origin and a destination.
@@ -509,7 +691,13 @@ export function planRoutes(origin: LatLng, destination: LatLng): RouteSummary[] 
   for (const id of ["fastest", "balanced", "safest"] as const) {
     const profile = ROUTE_PROFILES[id];
     const inFlagged = (edgeId: number) => eng.inFlaggedArea[edgeId] === 1;
-    let route = findRoute(eng.graph, scoreOf, startNode, goalNode, profile, { inFlaggedArea: inFlagged });
+    const elevationPenalty = avoidElevation
+      ? (edgeId: number) => eng.elevationPenalty[edgeId]
+      : undefined;
+    let route = findRoute(eng.graph, scoreOf, startNode, goalNode, profile, {
+      inFlaggedArea: inFlagged,
+      elevationPenalty,
+    });
     let bestEffort = false;
 
     // A strict profile can cut the graph into disconnected pieces - if every
@@ -529,13 +717,14 @@ export function planRoutes(origin: LatLng, destination: LatLng): RouteSummary[] 
       for (const relaxed of stages) {
         route = findRoute(eng.graph, scoreOf, startNode, goalNode, relaxed, {
           inFlaggedArea: inFlagged,
+          elevationPenalty,
         });
         if (route) break;
       }
       bestEffort = Boolean(route);
       if (route) {
         out.push({
-          ...summarize(route, eng.scores, profile, eng.graph.nodes, baselineEntered, baselineMeters),
+          ...summarize(route, eng.scores, profile, eng.graph.nodes, baselineEntered, baselineMeters, { climbMeters: eng.climbMeters, steepSeverity: eng.steepSeverity, avoidElevation }),
           label: `${profile.label} (best effort - could not clear every flagged area)`,
         });
         continue;
@@ -549,7 +738,8 @@ export function planRoutes(origin: LatLng, destination: LatLng): RouteSummary[] 
         profile,
         eng.graph.nodes,
         baselineEntered,
-        baselineMeters
+        baselineMeters,
+        { climbMeters: eng.climbMeters, steepSeverity: eng.steepSeverity, avoidElevation }
       );
       if (id === "fastest") {
         baselineEntered = new Set(summary.neighborhoodsEntered.map((n) => n.name));

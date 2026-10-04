@@ -13,7 +13,8 @@
     "ml:export-features": "tsx scripts/exportTrainingFeatures.ts",
     "data:fetch-bike-graph": "node scripts/fetchSfBikeGraph.mjs",
     "prepare-assets": "node scripts/copyMaplibreWorker.mjs",
-    "render:tour": "node scripts/renderTour.mjs"
+    "render:tour": "node scripts/renderTour.mjs",
+    "data:fetch-elevation": "node scripts/fetchSfElevation.mjs"
   },
   "dependencies": {
     "@react-google-maps/api": "^2.20.8",
@@ -30,6 +31,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.2.12",
     "playwright": "^1.63.0",
+    "pngjs": "^7.0.0",
     "tailwindcss": "^4",
     "tsx": "^4.23.15",
     "typescript": "^5",
