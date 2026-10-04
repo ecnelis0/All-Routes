@@ -14,7 +14,8 @@
     "data:fetch-bike-graph": "node scripts/fetchSfBikeGraph.mjs",
     "prepare-assets": "node scripts/copyMaplibreWorker.mjs",
     "render:tour": "node scripts/renderTour.mjs",
-    "data:fetch-elevation": "node scripts/fetchSfElevation.mjs"
+    "data:fetch-elevation": "node scripts/fetchSfElevation.mjs",
+    "data:import-signals": "node scripts/importTrafficSignals.mjs"
   },
   "dependencies": {
     "@react-google-maps/api": "^2.20.8",

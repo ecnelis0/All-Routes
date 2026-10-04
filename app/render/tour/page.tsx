@@ -153,7 +153,7 @@ export default function TourRenderPage() {
         // Exactly the layers the interactive tour builds - see
         // lib/tour/layers.ts. A rendered clip that does not match what
         // the user saw on screen is the bug this shares code to avoid.
-        addTourLayers(map, { path, profile });
+        addTourLayers(map, { path, profile, pathElevations: route.pathElevations });
 
         window.__tourSeek = (t: number) =>
           new Promise<void>((resolve) => {

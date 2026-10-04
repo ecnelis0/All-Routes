@@ -111,6 +111,7 @@ export default function Home() {
   const [modelMeta, setModelMeta] = useState<{ modelSource: string; modelVersion: string } | null>(null);
   const [confirmed, setConfirmed] = useState(false);
   const [avoidElevation, setAvoidElevation] = useState(false);
+  const [fewerSignals, setFewerSignals] = useState(false);
   const [tourOpen, setTourOpen] = useState(false);
   const [computingSafer, setComputingSafer] = useState(false);
   const [routingError, setRoutingError] = useState<string | null>(null);
@@ -168,7 +169,12 @@ export default function Home() {
    * client sends two points and receives three finished routes - see
    * app/api/route/route.ts.
    */
-  async function startRouteSearch(from: LatLng, to: LatLng, hills = avoidElevation) {
+  async function startRouteSearch(
+    from: LatLng,
+    to: LatLng,
+    hills = avoidElevation,
+    lights = fewerSignals
+  ) {
     const requestId = ++routeRequestIdRef.current;
     setRoutes({});
     setSelectedRouteKind("fastest");
@@ -184,7 +190,12 @@ export default function Home() {
       const res = await fetch("/api/route", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ origin: from, destination: to, avoidElevation: hills }),
+        body: JSON.stringify({
+          origin: from,
+          destination: to,
+          avoidElevation: hills,
+          fewerSignals: lights,
+        }),
       });
       const json = (await res.json()) as {
         routes?: RouteSummary[];
@@ -235,7 +246,16 @@ export default function Home() {
     // with the OLD setting.
     if (origin && destination) {
       resetRouteState();
-      void startRouteSearch(origin, destination, next);
+      void startRouteSearch(origin, destination, next, fewerSignals);
+    }
+  }
+
+  function toggleFewerSignals() {
+    const next = !fewerSignals;
+    setFewerSignals(next);
+    if (origin && destination) {
+      resetRouteState();
+      void startRouteSearch(origin, destination, avoidElevation, next);
     }
   }
 
@@ -313,6 +333,22 @@ export default function Home() {
           >
             <span className="font-medium">Avoid hills</span>
             <span className="text-[11px] text-black">{avoidElevation ? "On" : "Off"}</span>
+          </button>
+          <button
+            type="button"
+            onClick={toggleFewerSignals}
+            aria-pressed={fewerSignals}
+            className={`flex items-center justify-between rounded-md border px-3 py-1.5 text-left text-sm transition-colors ${
+              fewerSignals
+                ? "border-sky-600 bg-sky-50 text-black"
+                : "border-slate-200 bg-white text-black hover:bg-slate-50"
+            }`}
+          >
+            <span className="flex flex-col">
+              <span className="font-medium">Fewer traffic lights</span>
+              <span className="text-[10px] text-black/55">Smoother, fewer stops</span>
+            </span>
+            <span className="text-[11px] text-black">{fewerSignals ? "On" : "Off"}</span>
           </button>
           <button
             type="button"
@@ -439,6 +475,10 @@ export default function Home() {
                   </span>
                 </div>
                 <div className="flex justify-between">
+                  <span>Traffic lights</span>
+                  <span className="font-medium">{activeRoute.trafficSignals}</span>
+                </div>
+                <div className="flex justify-between">
                   <span>Elevation gain</span>
                   <span className="font-medium">
                     {Math.round(activeRoute.elevationGainMeters * 3.281)} ft
@@ -463,6 +503,17 @@ export default function Home() {
                     %)
                   </span>
                 </div>
+
+                {/best effort/i.test(activeRoute.label) && (
+                  <p
+                    role="note"
+                    className="mt-1 rounded-md border border-slate-300 bg-slate-100 px-2 py-1.5 leading-snug text-slate-800"
+                  >
+                    Your start or destination is inside a flagged area, so this route
+                    couldn&apos;t avoid every one. It avoids as much as the street network
+                    allows.
+                  </p>
+                )}
 
                 {activeRoute.detourWarning && (
                   <p
@@ -604,6 +655,7 @@ export default function Home() {
             profile={activeRoute.profile}
             streetSpans={activeRoute.streetSpans}
             classSpans={activeRoute.classSpans}
+            pathElevations={activeRoute.pathElevations}
             protectedSpans={activeRoute.protectedSpans}
             avoidedNearby={activeRoute.avoidedNearby}
             onClose={() => setTourOpen(false)}

@@ -95,6 +95,58 @@ export interface TourLayerOptions {
   /** Flagged-area slabs are useful in the interactive tour, noise in a short clip. */
   includeDangerAreas?: boolean;
   includeTraffic?: boolean;
+  /**
+   * Ground elevation at each vertex of `path`. When present, the steep
+   * stretches of the route are drawn over the route line so a climb is
+   * visible before you reach it.
+   */
+  pathElevations?: number[];
+}
+
+/** Grade above which a stretch of route is highlighted as a climb. */
+export const CLIMB_HIGHLIGHT_GRADE = 0.06;
+
+/**
+ * Splits a route into its climbing stretches (grade >= 6% in the direction
+ * of travel), merged so a hill reads as one highlighted run rather than a
+ * dotted line of OSM fragments. Grades are taken over >= 20m so DEM noise
+ * on a short sliver cannot flag a flat block.
+ */
+export function steepStretches(
+  path: LatLng[],
+  elevations: number[],
+  threshold = CLIMB_HIGHLIGHT_GRADE
+): { coordinates: [number, number][]; grade: number }[] {
+  if (path.length < 2 || elevations.length !== path.length) return [];
+  const out: { coordinates: [number, number][]; grade: number }[] = [];
+  let current: { coordinates: [number, number][]; rise: number; run: number } | null = null;
+
+  const flush = () => {
+    if (current && current.coordinates.length >= 2 && current.run >= 20) {
+      out.push({ coordinates: current.coordinates, grade: current.rise / current.run });
+    }
+    current = null;
+  };
+
+  for (let i = 1; i < path.length; i++) {
+    const a = path[i - 1];
+    const b = path[i];
+    const dLat = (b.lat - a.lat) * 111_320;
+    const dLng = (b.lng - a.lng) * 111_320 * Math.cos((a.lat * Math.PI) / 180);
+    const run = Math.sqrt(dLat * dLat + dLng * dLng);
+    const rise = elevations[i] - elevations[i - 1];
+    const grade = rise / Math.max(run, 20);
+    if (grade >= threshold) {
+      if (!current) current = { coordinates: [[a.lng, a.lat]], rise: 0, run: 0 };
+      current.coordinates.push([b.lng, b.lat]);
+      current.rise += rise;
+      current.run += run;
+    } else {
+      flush();
+    }
+  }
+  flush();
+  return out;
 }
 
 /**
@@ -108,6 +160,40 @@ export function addTourLayers(map: MlMap, opts: TourLayerOptions) {
 
   if (!map.getSource(TERRAIN_SOURCE_ID)) map.addSource(TERRAIN_SOURCE_ID, terrainSourceSpec());
   map.setTerrain({ source: TERRAIN_SOURCE_ID, exaggeration: TERRAIN_EXAGGERATION });
+
+  // Shaded relief from the same elevation model the terrain mesh uses.
+  // Displaced geometry alone reads weakly from a tilted camera - a hill
+  // and a flat block look much alike until light falls across them. A
+  // separate DEM source is used because MapLibre advises against sharing
+  // one raster-dem source between terrain and hillshade (it forces both
+  // to the same resolution).
+  if (!map.getSource("hillshade-dem")) {
+    map.addSource("hillshade-dem", terrainSourceSpec());
+  }
+  if (!map.getLayer("hillshade")) {
+    // Inserted beneath extruded buildings and everything above, so the
+    // relief shades the ground rather than painting over the city.
+    const before = ["buildings-3d", "sf-buildings-3d", "danger-fill", "route-glow"].find((id) =>
+      map.getLayer(id)
+    );
+    map.addLayer(
+      {
+        id: "hillshade",
+        type: "hillshade",
+        source: "hillshade-dem",
+        paint: {
+          "hillshade-exaggeration": 0.55,
+          "hillshade-shadow-color": "rgba(15, 23, 42, 0.55)",
+          "hillshade-highlight-color": "rgba(255, 255, 255, 0.18)",
+          "hillshade-accent-color": "rgba(15, 23, 42, 0.25)",
+          // Light from the north-west, the cartographic convention - the
+          // eye reads relief correctly when shadows fall to the south-east.
+          "hillshade-illumination-direction": 315,
+        },
+      },
+      before
+    );
+  }
 
   if (includeDangerAreas && !map.getSource("danger-areas")) {
     map.addSource("danger-areas", {
@@ -174,6 +260,41 @@ export function addTourLayers(map: MlMap, opts: TourLayerOptions) {
       layout: { "line-cap": "round", "line-join": "round" },
       paint: { "line-color": colour, "line-width": 6 },
     });
+  }
+
+  if (opts.pathElevations && opts.pathElevations.length === path.length) {
+    const stretches = steepStretches(path, opts.pathElevations);
+    const data: GeoJSON.FeatureCollection = {
+      type: "FeatureCollection",
+      features: stretches.map((st) => ({
+        type: "Feature",
+        geometry: { type: "LineString", coordinates: st.coordinates },
+        properties: { grade: Math.round(st.grade * 1000) / 10 },
+      })),
+    };
+    if (!map.getSource("route-climbs")) map.addSource("route-climbs", { type: "geojson", data });
+    else (map.getSource("route-climbs") as GeoJSONSource).setData(data);
+    if (!map.getLayer("route-climbs")) {
+      map.addLayer({
+        id: "route-climbs",
+        type: "line",
+        source: "route-climbs",
+        layout: { "line-cap": "round", "line-join": "round" },
+        paint: {
+          // Amber at 6%, red by 12%: the point most riders start walking.
+          "line-color": [
+            "interpolate",
+            ["linear"],
+            ["get", "grade"],
+            6,
+            "#f59e0b",
+            12,
+            "#dc2626",
+          ],
+          "line-width": 7,
+        },
+      });
+    }
   }
 
   if (!map.getSource("endpoints")) {
@@ -311,7 +432,7 @@ export function applyRealBuildings(
 
   // Keep what the tour is about above the city it flies through;
   // fill-extrusion otherwise paints over ground-level geometry.
-  for (const id of ["route-glow", "route-casing", "route-line", "traffic-cars", "tour-dot"]) {
+  for (const id of ["route-glow", "route-casing", "route-line", "route-climbs", "traffic-cars", "tour-dot"]) {
     if (map.getLayer(id)) map.moveLayer(id);
   }
 }

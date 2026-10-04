@@ -62,6 +62,8 @@ interface Props {
   profile: string;
   streetSpans?: StreetSpan[];
   classSpans?: { roadClass: string; startMeters: number; endMeters: number }[];
+  /** Ground elevation at each vertex of `path`, for climb highlighting. */
+  pathElevations?: number[];
   protectedSpans?: ProtectedSpan[];
   avoidedNearby?: AvoidedArea[];
   onClose: () => void;
@@ -87,6 +89,7 @@ export default function Route3DTour({
   profile,
   streetSpans = [],
   classSpans = [],
+  pathElevations,
   protectedSpans = [],
   avoidedNearby = [],
   onClose,
@@ -181,9 +184,9 @@ export default function Route3DTour({
         const img = makeCyclistIcon();
         if (img) map.addImage("cyclist", img, { pixelRatio: 2 });
       }
-      addTourLayers(map, { path, profile });
+      addTourLayers(map, { path, profile, pathElevations });
     },
-    [path, profile]
+    [path, profile, pathElevations]
   );
 
   // --- map setup ---------------------------------------------------------

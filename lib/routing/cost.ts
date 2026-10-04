@@ -89,12 +89,12 @@ export function edgeCost(
   profile: RouteProfile,
   inFlaggedArea = false,
   /**
-   * Extra effective metres for climbing this edge, precomputed per edge by
-   * the engine and passed as 0 unless "avoid elevation" is switched on.
+   * Extra effective metres for this edge from opt-in preferences (climbing,
+   * traffic signals), precomputed by the engine and 0 when none are on.
    * Additive and never negative, so cost stays >= true length and the A*
    * heuristic remains admissible.
    */
-  elevationPenalty = 0
+  extraPenalty = 0
 ): number {
   if (score >= profile.hardAvoidScore) return Infinity;
   if (profile.avoidFlaggedAreas && inFlaggedArea) return Infinity;
@@ -103,6 +103,6 @@ export function edgeCost(
   const laneFactor = protectedTier ? 1 : profile.unprotectedPenalty;
   return (
     edge.lengthMeters * (1 + profile.safetyWeight * (score / 100)) * laneFactor +
-    Math.max(0, elevationPenalty)
+    Math.max(0, extraPenalty)
   );
 }

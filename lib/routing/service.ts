@@ -14,6 +14,7 @@ import { findRoute, type RoutePath } from "./astar";
 import { ROUTE_PROFILES, type RouteProfile } from "./cost";
 import rawGraph from "../data/sfBikeGraph.json";
 import rawElevation from "../data/sfNodeElevation.json";
+import rawSignals from "../data/sfTrafficSignals.json";
 import {
   SEVERITY_MULTIPLIER,
   SF_STEEP_AREAS,
@@ -63,6 +64,8 @@ export interface RoutingEngine {
   inFlaggedArea: Uint8Array;
   /** Per directed edge: metres climbed travelling from `from` to `to` (negative = descent). */
   climbMeters: Float32Array;
+  /** Per node: ground elevation in metres. */
+  nodeElevation: Float32Array;
   /**
    * Per directed edge: extra effective metres charged for climbing it when
    * "avoid elevation" is on. Precomputed so the A* inner loop pays an
@@ -71,7 +74,29 @@ export interface RoutingEngine {
   elevationPenalty: Float32Array;
   /** Per directed edge: the listed severity this edge triggered, if any. */
   steepSeverity: (SteepSeverity | null)[];
+  /**
+   * Per node: index of the traffic signal at this intersection, or -1.
+   * Several nodes can share one signal (dual carriageways, wide
+   * intersections), which is why routes count signals by id, not by node.
+   */
+  signalAtNode: Int32Array;
+  /** Signals that matched at least one graph node. */
+  signalsMatched: number;
 }
+
+/**
+ * Flat-equivalent metres charged for riding through a signalised
+ * intersection when "fewer traffic lights" is on. A typical signal costs
+ * a cyclist ~25-30s of waiting on average; at ~4 m/s that is ~110m of
+ * riding. Rounded to 120.
+ */
+const SIGNAL_COST_METERS = 120;
+/**
+ * A signal applies to graph nodes within this radius. Signal points sit at
+ * the intersection centre, while OSM puts a node on each carriageway, so
+ * an exact-nearest match misses the far side of a wide junction.
+ */
+const SIGNAL_MATCH_METERS = 18;
 
 /**
  * Flat-equivalent metres charged per metre climbed when avoiding
@@ -262,8 +287,46 @@ export function getRoutingEngine(): RoutingEngine {
       (grade > WALL_GRADE ? edge.lengthMeters * WALL_COST_PER_METRE : 0);
   }
 
+  // TRAFFIC SIGNALS -> intersections. A coarse grid of nodes makes the
+  // radius search cheap for 1,300 signals against 112k nodes.
+  const signals = (rawSignals as { signals: { lat: number; lng: number }[] }).signals;
+  const CELL = 0.0006; // ~60m
+  const nodeGrid = new Map<string, number[]>();
+  graph.nodes.forEach((p, i) => {
+    const k = `${Math.floor(p.lat / CELL)},${Math.floor(p.lng / CELL)}`;
+    const b = nodeGrid.get(k);
+    if (b) b.push(i);
+    else nodeGrid.set(k, [i]);
+  });
+  const signalAtNode = new Int32Array(graph.nodes.length).fill(-1);
+  let signalsMatched = 0;
+  signals.forEach((sig, si) => {
+    const r0 = Math.floor(sig.lat / CELL);
+    const c0 = Math.floor(sig.lng / CELL);
+    let hit = false;
+    for (let dr = -1; dr <= 1; dr++) {
+      for (let dc = -1; dc <= 1; dc++) {
+        for (const i of nodeGrid.get(`${r0 + dr},${c0 + dc}`) ?? []) {
+          const n = graph.nodes[i];
+          const dLat = (n.lat - sig.lat) * 111_320;
+          const dLng = (n.lng - sig.lng) * 111_320 * Math.cos((sig.lat * Math.PI) / 180);
+          if (Math.sqrt(dLat * dLat + dLng * dLng) <= SIGNAL_MATCH_METERS) {
+            signalAtNode[i] = si;
+            hit = true;
+          }
+        }
+      }
+    }
+    if (hit) signalsMatched++;
+  });
+
+  const nodeElevation = Float32Array.from(elev.elevDm, (dm) => dm / 10);
+
   engine = {
     graph,
+    nodeElevation,
+    signalAtNode,
+    signalsMatched,
     climbMeters,
     elevationPenalty,
     steepSeverity,
@@ -372,6 +435,15 @@ export interface RouteSummary {
   steepClimbs: { name: string; severity: SteepSeverity; meters: number }[];
   /** Whether this route was planned with "avoid elevation" on. */
   avoidedElevation: boolean;
+  /**
+   * Traffic signals the route rides through, counted once per signal even
+   * when an intersection spans several graph nodes.
+   */
+  trafficSignals: number;
+  /** Whether this route was planned with "fewer traffic lights" on. */
+  preferredFewerSignals: boolean;
+  /** Ground elevation (m) at each vertex of `path`, same length and order. */
+  pathElevations: number[];
 }
 
 /** Above this much extra distance versus the fastest route, say so plainly. */
@@ -415,6 +487,9 @@ function summarize(
     climbMeters: Float32Array;
     steepSeverity: (SteepSeverity | null)[];
     avoidElevation: boolean;
+    signalAtNode?: Int32Array;
+    fewerSignals?: boolean;
+    nodeElevation?: Float32Array;
   } | null = null
 ): RouteSummary {
   const tierBreakdown: Record<BikeLaneTier, number> = {
@@ -434,7 +509,8 @@ function summarize(
   const classSpans: RouteSummary["classSpans"] = [];
   let gain = 0;
   let maxGrade = 0;
-  const steep = new Map<string, number>();
+  const steep = new Map<string, { meters: number; severity: SteepSeverity }>();
+  const signalsSeen = new Set<number>();
   let metersInFlaggedAreas = 0;
   let travelled = 0;
 
@@ -536,10 +612,24 @@ function summarize(
         if (e.lengthMeters >= 25) maxGrade = Math.max(maxGrade, climb / e.lengthMeters);
         const sev = elevation.steepSeverity[e.id];
         if (sev) {
-          const key = `${e.name ?? "Unnamed climb"}|${sev}`;
-          steep.set(key, (steep.get(key) ?? 0) + e.lengthMeters);
+          // One entry per street, at its WORST severity - listing the same
+          // street twice at two severities reads as two different climbs.
+          const name = e.name ?? "Unnamed path";
+          const prev = steep.get(name);
+          steep.set(name, {
+            meters: (prev?.meters ?? 0) + e.lengthMeters,
+            severity:
+              prev && SEVERITY_MULTIPLIER[prev.severity] >= SEVERITY_MULTIPLIER[sev] ? prev.severity : sev,
+          });
         }
       }
+    }
+
+    if (elevation?.signalAtNode) {
+      const sig = elevation.signalAtNode[e.to];
+      // Collected by signal id in a Set, so a dual-carriageway junction the
+      // route touches at several nodes is still one light.
+      if (sig >= 0) signalsSeen.add(sig);
     }
 
     // MUST be the last statement in the loop. It used to sit just after
@@ -588,16 +678,23 @@ function summarize(
     elevationGainMeters: Math.round(gain),
     maxGradePercent: Math.round(maxGrade * 1000) / 10,
     steepClimbs: [...steep.entries()]
-      .map(([key, meters]) => {
-        const [name, severity] = key.split("|");
-        return { name, severity: severity as SteepSeverity, meters: Math.round(meters) };
-      })
+      .map(([name, v]) => ({ name, severity: v.severity, meters: Math.round(v.meters) }))
       .filter((c) => c.meters >= 30)
       .sort(
         (x, y) =>
           SEVERITY_MULTIPLIER[y.severity] - SEVERITY_MULTIPLIER[x.severity] || y.meters - x.meters
       ),
     avoidedElevation: elevation?.avoidElevation ?? false,
+    trafficSignals: signalsSeen.size,
+    preferredFewerSignals: elevation?.fewerSignals ?? false,
+    // path[0] is the start node, then one vertex per edge's `to` node -
+    // the same order astar's reconstruct builds `path` in.
+    pathElevations: elevation?.nodeElevation
+      ? [
+          route.edges.length ? elevation.nodeElevation[route.edges[0].from] : 0,
+          ...route.edges.map((e) => elevation.nodeElevation![e.to]),
+        ].map((m) => Math.round(m * 10) / 10)
+      : [],
     detourWarning:
       baselineMeters > 0 && route.distanceMeters > baselineMeters * (1 + DETOUR_WARN_THRESHOLD)
         ? {
@@ -645,6 +742,17 @@ export class RoutingError extends Error {}
  * nudging approach was, but genuinely the lowest-danger path the network
  * admits.
  */
+/**
+ * True when this edge rides INTO a signalised intersection from outside it.
+ * Edges between two nodes of the same signal (crossing the junction, or
+ * stepping between carriageways) are not a new light and are not charged.
+ */
+export function edgeEntersSignal(eng: RoutingEngine, edgeId: number): boolean {
+  const e = eng.graph.edges[edgeId];
+  const to = eng.signalAtNode[e.to];
+  return to >= 0 && eng.signalAtNode[e.from] !== to;
+}
+
 export interface PlanOptions {
   /**
    * Charge for climbing on every profile, so routes go around hills where
@@ -653,6 +761,14 @@ export interface PlanOptions {
    * should not pay detours for it.
    */
   avoidElevation?: boolean;
+  /**
+   * Charge for each signalised intersection, so routes prefer streets with
+   * fewer traffic lights. Framed as convenience, not safety: a light-free
+   * route is quicker and smoother, but a signal can also be the safest way
+   * across a busy arterial, so this never overrides the safety profiles'
+   * hard constraints.
+   */
+  fewerSignals?: boolean;
 }
 
 export function planRoutes(
@@ -661,6 +777,7 @@ export function planRoutes(
   options: PlanOptions = {}
 ): RouteSummary[] {
   const avoidElevation = options.avoidElevation ?? false;
+  const fewerSignals = options.fewerSignals ?? false;
   const eng = getRoutingEngine();
 
   // Snap to nodes that can actually serve as an origin and a destination.
@@ -691,12 +808,22 @@ export function planRoutes(
   for (const id of ["fastest", "balanced", "safest"] as const) {
     const profile = ROUTE_PROFILES[id];
     const inFlagged = (edgeId: number) => eng.inFlaggedArea[edgeId] === 1;
-    const elevationPenalty = avoidElevation
-      ? (edgeId: number) => eng.elevationPenalty[edgeId]
-      : undefined;
+    // Opt-in preferences compose additively. A signal is charged once, on
+    // the edge that ENTERS its intersection from outside. Charging every
+    // edge that arrives at a flagged node over-billed badly: 18m around a
+    // signal catches ~7 OSM nodes (crosswalks, curbs, both carriageways),
+    // so one junction was charged up to five times and "fewer lights"
+    // detoured 44% to dodge them.
+    const entersSignal = (edgeId: number) => edgeEntersSignal(eng, edgeId);
+    const extraPenalty =
+      avoidElevation || fewerSignals
+        ? (edgeId: number) =>
+            (avoidElevation ? eng.elevationPenalty[edgeId] : 0) +
+            (fewerSignals && entersSignal(edgeId) ? SIGNAL_COST_METERS : 0)
+        : undefined;
     let route = findRoute(eng.graph, scoreOf, startNode, goalNode, profile, {
       inFlaggedArea: inFlagged,
-      elevationPenalty,
+      extraPenalty,
     });
     let bestEffort = false;
 
@@ -717,15 +844,16 @@ export function planRoutes(
       for (const relaxed of stages) {
         route = findRoute(eng.graph, scoreOf, startNode, goalNode, relaxed, {
           inFlaggedArea: inFlagged,
-          elevationPenalty,
+          extraPenalty,
         });
         if (route) break;
       }
       bestEffort = Boolean(route);
       if (route) {
         out.push({
-          ...summarize(route, eng.scores, profile, eng.graph.nodes, baselineEntered, baselineMeters, { climbMeters: eng.climbMeters, steepSeverity: eng.steepSeverity, avoidElevation }),
-          label: `${profile.label} (best effort - could not clear every flagged area)`,
+          ...summarize(route, eng.scores, profile, eng.graph.nodes, baselineEntered, baselineMeters, { climbMeters: eng.climbMeters, steepSeverity: eng.steepSeverity, avoidElevation, signalAtNode: eng.signalAtNode, fewerSignals, nodeElevation: eng.nodeElevation }),
+          // Short enough for a tab; the panel explains it in full.
+          label: `${profile.label} · best effort`,
         });
         continue;
       }
@@ -739,7 +867,7 @@ export function planRoutes(
         eng.graph.nodes,
         baselineEntered,
         baselineMeters,
-        { climbMeters: eng.climbMeters, steepSeverity: eng.steepSeverity, avoidElevation }
+        { climbMeters: eng.climbMeters, steepSeverity: eng.steepSeverity, avoidElevation, signalAtNode: eng.signalAtNode, fewerSignals, nodeElevation: eng.nodeElevation }
       );
       if (id === "fastest") {
         baselineEntered = new Set(summary.neighborhoodsEntered.map((n) => n.name));
