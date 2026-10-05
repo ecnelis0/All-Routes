@@ -19,7 +19,6 @@ import type { RouteSummary } from "@/lib/routing/service";
 import type {
   BikeLaneSegment,
   DangerZone,
-  HighwaySegment,
   LatLng,
   NamedDangerLocation,
 } from "@/lib/types";
@@ -34,7 +33,6 @@ const LIBRARIES: [] = [];
 interface LayersResponse {
   city: { name: string; center: { lat: number; lng: number } };
   dangerZones: DangerZone[];
-  highways: HighwaySegment[];
   bikeLanes: BikeLaneSegment[];
   namedDangerLocations: NamedDangerLocation[];
 }

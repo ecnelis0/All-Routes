@@ -118,8 +118,12 @@ export class PrecomputedScoreModel implements SafetyModel {
  * the 0.3 infrastructure weight the original model used.
  */
 export const BASELINE_COEFFICIENTS: Record<keyof EdgeFeatures, number> = {
-  crashDensity: 1.6,
-  severeCrashDensity: 2.4,
+  // Crash features are log1p counts (see features.ts). At the 99th
+  // percentile of real SF edges (log1p ~3.9 all, ~3.7 severe) these add
+  // ~25 points; the busiest hotspot in the city ~33. Comparable to having
+  // no bike lane at all (30), so neither can drown out the other.
+  crashDensity: 3.5,
+  severeCrashDensity: 3.0,
   laneProtection: 30,
   isCycleway: -12,
   freewayProximity: 22,
@@ -134,10 +138,12 @@ export const BASELINE_COEFFICIENTS: Record<keyof EdgeFeatures, number> = {
   lengthKm: 0,
 };
 
+export const BASELINE_INTERCEPT = 4;
+
 export function createBaselineModel(): LinearSafetyModel {
   return new LinearSafetyModel(
     `baseline-f${FEATURE_SET_VERSION}`,
     FEATURE_ORDER.map((k) => BASELINE_COEFFICIENTS[k]),
-    4
+    BASELINE_INTERCEPT
   );
 }

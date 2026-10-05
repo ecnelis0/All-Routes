@@ -2,7 +2,9 @@ import { NextResponse } from "next/server";
 import { computeCompositeDangerZones, computeRoadNetworkSafety } from "@/lib/danger";
 import { REAL_SF_BIKE_LANES } from "@/lib/dataSources/sfmtaBikeLanes";
 import { REAL_SF_ROADS } from "@/lib/dataSources/osmRoads";
-import { ALL_MOCK_CRASHES, DEMO_CITY, MOCK_HIGHWAY_SEGMENTS, NAMED_DANGEROUS_LOCATIONS } from "@/lib/mockData";
+import { REAL_SF_BIKE_CRASHES } from "@/lib/dataSources/sfBikeCrashes";
+import { REAL_SF_HIGHWAYS } from "@/lib/dataSources/sfHighways";
+import { DEMO_CITY, NAMED_DANGEROUS_LOCATIONS } from "@/lib/mockData";
 
 // Only the tiers worth actively routing toward/reporting on client-side
 // (see lib/routing.ts's "favor the routes with a bike lane" detour pass and
@@ -14,8 +16,7 @@ const ROUTABLE_BIKE_LANES = REAL_SF_BIKE_LANES.filter(
 );
 
 /**
- * Serves the map-layer data for the demo city: crash records,
- * highway/arterial segments, the precomputed composite danger zones
+ * Serves the map-layer data for the demo city: the precomputed composite danger zones
  * (circles - kept for future route-risk scoring, not rendered on the map),
  * and `roadSegments` - the full colored *real* road network actually shown
  * on the map today (every named freeway/arterial/cycleway in the demo city,
@@ -24,9 +25,10 @@ const ROUTABLE_BIKE_LANES = REAL_SF_BIKE_LANES.filter(
  * street data (`lib/dataSources/osmRoads.ts`) so it lines up with the roads
  * Google's basemap actually draws; scoring is fed by real SFMTA bike-network
  * data (`lib/dataSources/sfmtaBikeLanes.ts`, ~5,450 surveyed segments) for
- * bike-infrastructure quality. `crashes`/`highways` remain mock data for
- * now - swapping those in only requires changing what populates those
- * scoring inputs - see lib/dataSources/bikemaps.ts for the adapter stub.
+ * bike-infrastructure quality, real DataSF bicycle injury crashes
+ * (`lib/dataSources/sfBikeCrashes.ts`) and real OSM freeways/arterials
+ * (`lib/dataSources/sfHighways.ts`) - the same inputs the router scores
+ * with, so the map and the routes cannot disagree about a street.
  *
  * The *full* ~5,450-segment bike-lane dataset is not included - it's used
  * server-side as a scoring input (and never rendered directly; `roadSegments`
@@ -46,26 +48,33 @@ const ROUTABLE_BIKE_LANES = REAL_SF_BIKE_LANES.filter(
  * real bike-lane dataset) - see lib/danger.test.ts for a determinism check
  * confirming repeated calls produce identical output.
  */
-export async function GET() {
-  const dangerZones = computeCompositeDangerZones(
-    ALL_MOCK_CRASHES,
-    REAL_SF_BIKE_LANES,
-    MOCK_HIGHWAY_SEGMENTS
-  );
-  const roadSegments = computeRoadNetworkSafety(
-    ALL_MOCK_CRASHES,
-    REAL_SF_BIKE_LANES,
-    MOCK_HIGHWAY_SEGMENTS,
-    REAL_SF_ROADS
-  );
+// Every input here is static for the life of the server, and with the
+// real datasets (3,558 crashes x 5,566 highway segments) computing the
+// zones takes ~2.5s - so compute once, on first request, and reuse.
+let cached: Record<string, unknown> | null = null;
 
-  return NextResponse.json({
-    city: DEMO_CITY,
-    crashes: ALL_MOCK_CRASHES,
-    highways: MOCK_HIGHWAY_SEGMENTS,
-    dangerZones,
-    roadSegments,
-    bikeLanes: ROUTABLE_BIKE_LANES,
-    namedDangerLocations: NAMED_DANGEROUS_LOCATIONS,
-  });
+export async function GET() {
+  if (!cached) {
+    const dangerZones = computeCompositeDangerZones(
+      REAL_SF_BIKE_CRASHES,
+      REAL_SF_BIKE_LANES,
+      REAL_SF_HIGHWAYS
+    );
+    const roadSegments = computeRoadNetworkSafety(
+      REAL_SF_BIKE_CRASHES,
+      REAL_SF_BIKE_LANES,
+      REAL_SF_HIGHWAYS,
+      REAL_SF_ROADS
+    );
+    // The raw crash and highway lists are not sent: the page only draws
+    // the computed zones, and the raw lists were 2.3MB of dead weight.
+    cached = {
+      city: DEMO_CITY,
+      dangerZones,
+      roadSegments,
+      bikeLanes: ROUTABLE_BIKE_LANES,
+      namedDangerLocations: NAMED_DANGEROUS_LOCATIONS,
+    };
+  }
+  return NextResponse.json(cached);
 }

@@ -1,5 +1,5 @@
 {
-  "featureSetVersion": 2,
+  "featureSetVersion": 3,
   "featureOrder": [
     "crashDensity",
     "severeCrashDensity",
@@ -12,7 +12,20 @@
     "neighborhoodRisk",
     "lengthKm"
   ],
+  "baselineCoefficients": {
+    "crashDensity": 3.5,
+    "severeCrashDensity": 3,
+    "laneProtection": 30,
+    "isCycleway": -12,
+    "freewayProximity": 22,
+    "arterialProximity": 14,
+    "speedNormalized": 8,
+    "roadClassRisk": 18,
+    "neighborhoodRisk": 0.25,
+    "lengthKm": 0
+  },
+  "baselineIntercept": 4,
   "edgeCount": 211221,
   "graphGeneratedAt": "2026-10-01T21:42:14.397Z",
-  "exportedAt": "2026-10-01T22:02:27.914Z"
+  "exportedAt": "2026-10-05T15:55:04.511Z"
 }

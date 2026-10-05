@@ -2,14 +2,16 @@ import { describe, expect, it } from "vitest";
 import { GET } from "./route";
 
 describe("GET /api/layers", () => {
-  it("returns city info, crashes, highways, and danger zones", async () => {
+  it("returns city info and danger zones built from real crash data", async () => {
     const response = await GET();
     expect(response.status).toBe(200);
 
     const body = await response.json();
     expect(body.city.name).toBe("San Francisco, CA");
-    expect(Array.isArray(body.crashes)).toBe(true);
-    expect(body.crashes.length).toBeGreaterThan(0);
+    // Raw crash and highway lists are scoring inputs only; the page draws
+    // the computed zones. Shipping them cost 2.3MB per page load.
+    expect(body.crashes).toBeUndefined();
+    expect(body.highways).toBeUndefined();
     // The real ~5,450-segment SFMTA bike-lane dataset is a scoring input
     // only (see route.ts) and deliberately not shipped in full - but a much
     // smaller filtered (fully/semi-protected only) `bikeLanes` subset is,
@@ -24,11 +26,14 @@ describe("GET /api/layers", () => {
     expect(body.namedDangerLocations.length).toBe(15);
     expect(body.namedDangerLocations[0]).toHaveProperty("name");
     expect(body.namedDangerLocations[0]).toHaveProperty("center");
-    expect(Array.isArray(body.highways)).toBe(true);
-    expect(body.highways.length).toBeGreaterThan(0);
     expect(Array.isArray(body.dangerZones)).toBe(true);
     expect(body.dangerZones.length).toBeGreaterThan(0);
     expect(body.dangerZones[0]).toHaveProperty("factorScores");
+    // Zones are built from real DataSF crashes ("sf-<id>"), not the old
+    // generated mock incidents ("mock-<n>").
+    const ids: string[] = body.dangerZones.flatMap((z: { crashIds: string[] }) => z.crashIds);
+    expect(ids.length).toBeGreaterThan(0);
+    expect(ids.every((id) => id.startsWith("sf-"))).toBe(true);
     expect(Array.isArray(body.roadSegments)).toBe(true);
     // Real OSM-sourced road network (freeways/arterials/cycleways), not just
     // our original handful of curated corridors - see lib/danger.test.ts for

@@ -38,22 +38,10 @@ FEATURE_META = ROOT / "ml" / "data" / "feature_meta.json"
 LABELS_CSV = ROOT / "ml" / "data" / "labels.csv"
 OUT_ARTIFACT = ROOT / "lib" / "data" / "model" / "safety-model.json"
 
-# Mirrors BASELINE_COEFFICIENTS in lib/scoring/model.ts. Used only by
-# --target=baseline, to generate a synthetic label so the pipeline can be
-# exercised end-to-end before real data exists.
-BASELINE_COEFFICIENTS = {
-    "crashDensity": 1.6,
-    "severeCrashDensity": 2.4,
-    "laneProtection": 30.0,
-    "isCycleway": -12.0,
-    "freewayProximity": 22.0,
-    "arterialProximity": 14.0,
-    "speedNormalized": 8.0,
-    "roadClassRisk": 18.0,
-    "neighborhoodRisk": 0.25,
-    "lengthKm": 0.0,
-}
-BASELINE_INTERCEPT = 4.0
+# The baseline's weights are read from feature_meta.json, which the export
+# writes straight from lib/scoring/model.ts - one source of truth. (This
+# file used to keep a hand-copied duplicate, which went stale the moment
+# the TypeScript weights changed.)
 
 
 def load_meta() -> dict:
@@ -79,11 +67,12 @@ def load_features(meta: dict) -> pd.DataFrame:
     return df
 
 
-def synthetic_baseline_target(df: pd.DataFrame, feature_order: list[str]) -> np.ndarray:
+def synthetic_baseline_target(df: pd.DataFrame, feature_order: list[str], meta: dict) -> np.ndarray:
     """The hand-tuned baseline's own output, as a stand-in label."""
-    y = np.full(len(df), BASELINE_INTERCEPT, dtype=float)
+    coefs = meta["baselineCoefficients"]
+    y = np.full(len(df), float(meta["baselineIntercept"]), dtype=float)
     for name in feature_order:
-        y += df[name].to_numpy(dtype=float) * BASELINE_COEFFICIENTS.get(name, 0.0)
+        y += df[name].to_numpy(dtype=float) * float(coefs.get(name, 0.0))
     return np.clip(y, 0, 100)
 
 
@@ -139,7 +128,7 @@ def main() -> None:
     X_all = df[feature_order].to_numpy(dtype=float)
 
     if args.target == "baseline":
-        y_all = synthetic_baseline_target(df, feature_order)
+        y_all = synthetic_baseline_target(df, feature_order, meta)
         print("WARNING: training against the hand-tuned baseline's own output.")
         print("         This validates the pipeline, not the model. Supply real")
         print("         labels in ml/data/labels.csv for a model worth shipping.\n")

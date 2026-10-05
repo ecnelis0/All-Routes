@@ -39,6 +39,16 @@ export interface EdgeFeatures {
    * because of how OSM happened to split the street.
    */
   crashDensity: number;
+  /**
+   * NOTE: both crash features are log1p of the weighted count, not the raw
+   * count. With real DataSF data (3,558 bike crashes since 2019) a raw
+   * count on a busy corridor reaches 50-150, and any linear weight that
+   * lets crashes matter at all then lets them swamp everything else: in
+   * testing, Valencia - 78% protected - scored as the most dangerous
+   * street in the city, purely because it is the most ridden. Diminishing
+   * returns keep a hotspot significant while letting lane protection,
+   * traffic speed and road class still decide between busy streets.
+   */
   /** Same, counting only severe (injury/fatal) incidents. */
   severeCrashDensity: number;
   /** 0 = fully protected lane, 1 = no cycling infrastructure at all. */
@@ -66,9 +76,11 @@ export interface EdgeFeatures {
   lengthKm: number;
 }
 
-// v2 added `neighborhoodRisk`. Bumping this is what makes an artifact
-// trained on v1 refuse to load rather than silently mis-map coefficients.
-export const FEATURE_SET_VERSION = 2;
+// v2 added `neighborhoodRisk`. v3 moved the crash features to log1p and
+// switched them from mock to real DataSF crashes. Bumping this is what
+// makes an artifact trained on an older set refuse to load rather than
+// silently mis-map coefficients.
+export const FEATURE_SET_VERSION = 3;
 
 /**
  * Positional order for the feature vector handed to a linear/tree model.
@@ -309,8 +321,8 @@ export function extractFeatures(edge: GraphEdge, ctx: FeatureContext): EdgeFeatu
   const km = edge.lengthMeters / 1000;
 
   return {
-    crashDensity: crashWeighted,
-    severeCrashDensity: severeWeighted,
+    crashDensity: Math.log1p(crashWeighted),
+    severeCrashDensity: Math.log1p(severeWeighted),
     laneProtection: LANE_PROTECTION[edge.tier],
     isCycleway: edge.roadClass === "cycleway" ? 1 : 0,
     freewayProximity: proximity(mid, ctx.freeways, FREEWAY_INFLUENCE_METERS),

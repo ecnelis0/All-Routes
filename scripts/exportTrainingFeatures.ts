@@ -19,7 +19,7 @@ import { writeFileSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { ALL_MOCK_CRASHES } from "../lib/mockData";
+import { REAL_SF_BIKE_CRASHES } from "../lib/dataSources/sfBikeCrashes";
 import { REAL_SF_HIGHWAYS } from "../lib/dataSources/sfHighways";
 import { REAL_SF_BIKE_LANES } from "../lib/dataSources/sfmtaBikeLanes";
 import { applySfmtaLaneTiers } from "../lib/scoring/laneMatch";
@@ -30,6 +30,7 @@ import {
   extractFeatures,
 } from "../lib/scoring/features";
 import { decodeGraph } from "../lib/routing/graph";
+import { BASELINE_COEFFICIENTS, BASELINE_INTERCEPT } from "../lib/scoring/model";
 import rawGraph from "../lib/data/sfBikeGraph.json";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -45,7 +46,7 @@ function main() {
       `upgraded to protected ${laneMatch.upgradedToProtected}\n`
   );
 
-  const ctx = buildFeatureContext(ALL_MOCK_CRASHES, REAL_SF_HIGHWAYS, graph.nodes);
+  const ctx = buildFeatureContext(REAL_SF_BIKE_CRASHES, REAL_SF_HIGHWAYS, graph.nodes);
 
   // Identifying columns first, then the feature vector in FEATURE_ORDER.
   // `edge_id` is what a precomputed score table is keyed by, and
@@ -107,6 +108,10 @@ function main() {
       {
         featureSetVersion: FEATURE_SET_VERSION,
         featureOrder: FEATURE_ORDER,
+        // The app's own baseline, so train.py's --target=baseline cannot
+        // drift from it (it previously kept a hand-copied duplicate).
+        baselineCoefficients: BASELINE_COEFFICIENTS,
+        baselineIntercept: BASELINE_INTERCEPT,
         edgeCount: graph.edges.length,
         graphGeneratedAt: graph.generatedAt,
         exportedAt: new Date().toISOString(),

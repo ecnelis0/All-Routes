@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 
 import type { BikeLaneTier, LatLng } from "../types";
-import { ALL_MOCK_CRASHES } from "../mockData";
+import { REAL_SF_BIKE_CRASHES } from "../dataSources/sfBikeCrashes";
 import { REAL_SF_HIGHWAYS } from "../dataSources/sfHighways";
 import { REAL_SF_BIKE_LANES } from "../dataSources/sfmtaBikeLanes";
 import { applySfmtaLaneTiers, type LaneMatchStats } from "../scoring/laneMatch";
@@ -58,6 +58,9 @@ export interface RoutingEngine {
    * passes happily while production silently scores against mock data.
    */
   highwaySegmentCount: number;
+  /** Crash records scored against, and where they came from - asserted by tests so a revert to mock data cannot pass silently. */
+  crashCount: number;
+  crashSource: string;
   /** Outcome of reconciling OSM tags against SFMTA's official bikeway network. */
   laneMatch: LaneMatchStats;
   /** Per-edge: does this edge's midpoint sit inside a flagged neighbourhood? */
@@ -195,7 +198,7 @@ export function getRoutingEngine(): RoutingEngine {
 
   const { model, source } = loadModel(graph);
 
-  const ctx = buildFeatureContext(ALL_MOCK_CRASHES, REAL_SF_HIGHWAYS, graph.nodes);
+  const ctx = buildFeatureContext(REAL_SF_BIKE_CRASHES, REAL_SF_HIGHWAYS, graph.nodes);
   const scores = new Float32Array(graph.edges.length);
 
   // Both directions of a two-way street share identical features, so score
@@ -338,6 +341,8 @@ export function getRoutingEngine(): RoutingEngine {
     model,
     modelSource: source,
     highwaySegmentCount: REAL_SF_HIGHWAYS.length,
+    crashCount: REAL_SF_BIKE_CRASHES.length,
+    crashSource: REAL_SF_BIKE_CRASHES[0]?.source ?? "none",
     laneMatch,
   };
   return engine;

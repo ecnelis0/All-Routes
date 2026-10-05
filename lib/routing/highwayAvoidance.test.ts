@@ -3,7 +3,7 @@ import { getRoutingEngine, planRoutes } from "./service";
 import { REAL_SF_HIGHWAYS } from "../dataSources/sfHighways";
 import { MOCK_HIGHWAY_SEGMENTS } from "../mockData";
 import { buildFeatureContext, extractFeatures } from "../scoring/features";
-import { ALL_MOCK_CRASHES } from "../mockData";
+import { REAL_SF_BIKE_CRASHES } from "../dataSources/sfBikeCrashes";
 import type { GraphEdge } from "./graph";
 
 /**
@@ -55,7 +55,7 @@ describe("highway exposure as a feature", () => {
   });
 
   it("sees exposure on most of the city, not a tenth of it", () => {
-    const ctx = buildFeatureContext(ALL_MOCK_CRASHES, REAL_SF_HIGHWAYS, eng.graph.nodes);
+    const ctx = buildFeatureContext(REAL_SF_BIKE_CRASHES, REAL_SF_HIGHWAYS, eng.graph.nodes);
     // Sample rather than scan all 211k edges - this is a test, not a job.
     const step = 37;
     let withExposure = 0;
@@ -72,7 +72,7 @@ describe("highway exposure as a feature", () => {
   });
 
   it("scores a freeway-adjacent point above a quiet inland one", () => {
-    const ctx = buildFeatureContext(ALL_MOCK_CRASHES, REAL_SF_HIGHWAYS, eng.graph.nodes);
+    const ctx = buildFeatureContext(REAL_SF_BIKE_CRASHES, REAL_SF_HIGHWAYS, eng.graph.nodes);
     const fake = (lat: number, lng: number): GraphEdge => {
       // Reuse a real node pair's shape but place it where we want by
       // appending two synthetic nodes to the context's node list.
