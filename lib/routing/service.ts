@@ -908,6 +908,17 @@ export function planRoutes(
  * coincide - which is an honest "we could not do better than this" rather
  * than a manufactured difference.
  */
+/**
+ * One tier showing another tier's route. The "best effort" suffix belongs
+ * to the route (it could not avoid every flagged area), so it travels with
+ * the route rather than staying with the tier that is adopting it.
+ */
+function adoptRoute(route: RouteSummary, as: RouteProfile["id"]): RouteSummary {
+  const bestEffort = route.label.endsWith("· best effort");
+  const base = ROUTE_PROFILES[as].label;
+  return { ...route, profile: as, label: bestEffort ? `${base} · best effort` : base };
+}
+
 function enforceSafetyOrdering(routes: RouteSummary[]): RouteSummary[] {
   const order: RouteProfile["id"][] = ["fastest", "balanced", "safest"];
   const byProfile = new Map(routes.map((r) => [r.profile, r]));
@@ -931,6 +942,25 @@ function enforceSafetyOrdering(routes: RouteSummary[]): RouteSummary[] {
         profile: stricter.profile,
         label: stricter.label,
       });
+    }
+  }
+
+  // Distance ladder: "Safest + bike lanes" is Safest with an extra
+  // preference, so it must never come out SHORTER than Safest. It can,
+  // because the two weigh danger differently: with "Avoid hills" on,
+  // Noe Valley -> North Beach gave Safest a flatter 6.06 mi detour while
+  // Safest + bike lanes took a hillier 5.56 mi route. When that happens
+  // the shorter route is normally a valid Safest route too (it avoids at
+  // least as much), so Safest takes it and the two are equal. Only if the
+  // bike-lane route had to cross more flagged area than Safest did does it
+  // go the other way, so neither option ever gives up area avoidance.
+  const balanced = byProfile.get("balanced");
+  const safest = byProfile.get("safest");
+  if (balanced && safest && safest.distanceMeters < balanced.distanceMeters - 1) {
+    if (safest.metersInFlaggedAreas <= balanced.metersInFlaggedAreas) {
+      byProfile.set("balanced", adoptRoute(safest, "balanced"));
+    } else {
+      byProfile.set("safest", adoptRoute(balanced, "safest"));
     }
   }
 

@@ -1,11 +1,13 @@
 "use client";
 
-import { Circle, GoogleMap, Marker, OverlayView, Polyline } from "@react-google-maps/api";
+import { Circle, GoogleMap, InfoWindow, Marker, OverlayView, Polyline } from "@react-google-maps/api";
 import {
   neighborhoodRiskColor,
   type DangerousNeighborhood,
 } from "@/lib/data/sfDangerousNeighborhoods";
 import { useMemo } from "react";
+import type { RouteDescription } from "@/lib/ui/routeDescription";
+import { distanceToPath } from "@/lib/ui/geometry";
 import type {
   DangerFactorScores,
   DangerZone,
@@ -22,13 +24,42 @@ export interface SelectedRouteDisplay {
   path: LatLng[];
 }
 
+export interface MapRoute extends SelectedRouteDisplay {
+  description: RouteDescription;
+}
+
+export interface RoutePopup {
+  kind: SelectedRouteDisplay["kind"];
+  /** Where the route was clicked - the popup opens there. */
+  position: LatLng;
+  /**
+   * Other routes running along the same street at the click point. Where
+   * two options share a stretch only the top line can take the click, so
+   * the popup offers the others rather than leaving them unreachable.
+   */
+  alsoHere: SelectedRouteDisplay["kind"][];
+}
+
+/** How close another route must run to the click to count as "also here". */
+const SHARED_STREET_METERS = 15;
+
 interface MapViewProps {
   center: LatLng;
   isLoaded: boolean;
   origin?: LatLng | null;
   destination?: LatLng | null;
-  /** The single route currently shown on the map - the UI lets the user switch between the 3 route options, and only the active one is drawn at a time. */
-  selectedRoute?: SelectedRouteDisplay | null;
+  /**
+   * Every route still on screen. All are drawn - the selected one bold and
+   * on top, the rest lighter beneath - and each can be clicked to see what
+   * kind of route it is, or removed from the map.
+   */
+  routes?: MapRoute[];
+  selectedKind?: SelectedRouteDisplay["kind"] | null;
+  popup?: RoutePopup | null;
+  onRouteClick?: (popup: RoutePopup) => void;
+  onPopupClose?: () => void;
+  onSelectRoute?: (kind: SelectedRouteDisplay["kind"]) => void;
+  onRemoveRoute?: (kind: SelectedRouteDisplay["kind"]) => void;
   /**
    * "Neighborhood view" - translucent circles over the same danger zones
    * used for route-risk scoring (see `computeCompositeDangerZones`). Not
@@ -122,7 +153,13 @@ export default function MapView({
   isLoaded,
   origin,
   destination,
-  selectedRoute,
+  routes = [],
+  selectedKind = null,
+  popup = null,
+  onRouteClick,
+  onPopupClose,
+  onSelectRoute,
+  onRemoveRoute,
   dangerZones = [],
   dangerousNeighborhoods = [],
   roadSegments = [],
@@ -226,17 +263,120 @@ export default function MapView({
         );
       })}
 
-      {selectedRoute && selectedRoute.path.length > 1 && (
-        <Polyline
-          path={selectedRoute.path}
-          options={{
-            strokeColor: ROUTE_COLOR_BY_KIND[selectedRoute.kind],
-            strokeOpacity: 0.95,
-            strokeWeight: 5,
-            zIndex: 30,
-          }}
-        />
-      )}
+      {routes
+        .filter((route) => route.path.length > 1)
+        .map((route) => {
+          const isSelected = route.kind === selectedKind;
+          const click = (e: google.maps.MapMouseEvent) => {
+            const at = e.latLng;
+            const position = at ? { lat: at.lat(), lng: at.lng() } : route.path[Math.floor(route.path.length / 2)];
+            onRouteClick?.({
+              kind: route.kind,
+              position,
+              alsoHere: routes
+                .filter((o) => o.kind !== route.kind && distanceToPath(position, o.path) <= SHARED_STREET_METERS)
+                .map((o) => o.kind),
+            });
+          };
+          return [
+            <Polyline
+              key={`${route.kind}-line`}
+              path={route.path}
+              options={{
+                strokeColor: ROUTE_COLOR_BY_KIND[route.kind],
+                strokeOpacity: isSelected ? 0.95 : 0.55,
+                strokeWeight: isSelected ? 6 : 4,
+                clickable: false,
+                zIndex: isSelected ? 32 : 30,
+              }}
+            />,
+            // A 5px line is a hard target, especially on a phone. A wide,
+            // nearly invisible twin catches the click instead.
+            <Polyline
+              key={`${route.kind}-hit`}
+              path={route.path}
+              onClick={click}
+              options={{
+                strokeColor: ROUTE_COLOR_BY_KIND[route.kind],
+                strokeOpacity: 0.01,
+                strokeWeight: 18,
+                clickable: true,
+                zIndex: isSelected ? 33 : 31,
+              }}
+            />,
+          ];
+        })}
+
+      {popup &&
+        (() => {
+          const route = routes.find((r) => r.kind === popup.kind);
+          if (!route) return null;
+          const d = route.description;
+          return (
+            <InfoWindow position={popup.position} onCloseClick={onPopupClose}>
+              <div className="flex max-w-60 flex-col gap-1.5 text-xs text-slate-900" data-testid="route-popup">
+                <p className="flex items-center gap-1.5 text-sm font-semibold">
+                  <span
+                    className="inline-block h-2.5 w-2.5 rounded-full"
+                    style={{ background: ROUTE_COLOR_BY_KIND[route.kind] }}
+                  />
+                  {d.title}
+                </p>
+                <ul className="flex flex-col gap-0.5">
+                  {d.choices.map((c) => (
+                    <li key={c.text} className={c.honoured ? "text-emerald-700" : "text-slate-500"}>
+                      {c.honoured ? "✓" : "✕"} {c.text}
+                    </li>
+                  ))}
+                </ul>
+                <p className="text-slate-600">{d.stats.join(" · ")}</p>
+                {popup.alsoHere.length > 0 && (
+                  <p className="flex flex-wrap items-center gap-1 text-slate-600">
+                    Also on this street:
+                    {popup.alsoHere.map((k) => {
+                      const other = routes.find((r) => r.kind === k);
+                      return other ? (
+                        <button
+                          key={k}
+                          type="button"
+                          onClick={() =>
+                            onRouteClick?.({
+                              kind: k,
+                              position: popup.position,
+                              alsoHere: [popup.kind, ...popup.alsoHere.filter((x) => x !== k)],
+                            })
+                          }
+                          className="rounded border px-1.5 py-0.5 font-medium text-slate-900"
+                          style={{ borderColor: ROUTE_COLOR_BY_KIND[k] }}
+                        >
+                          {other.description.title}
+                        </button>
+                      ) : null;
+                    })}
+                  </p>
+                )}
+                <div className="mt-1 flex gap-1.5">
+                  {route.kind !== selectedKind && (
+                    <button
+                      type="button"
+                      onClick={() => onSelectRoute?.(route.kind)}
+                      className="rounded bg-slate-900 px-2 py-1 font-semibold text-white"
+                    >
+                      Show details
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => onRemoveRoute?.(route.kind)}
+                    className="rounded border border-slate-300 px-2 py-1 font-medium"
+                  >
+                    Remove from map
+                  </button>
+                </div>
+              </div>
+            </InfoWindow>
+          );
+        })()}
 
       {origin && <Marker position={origin} label={{ text: "A", color: "white" }} />}
       {destination && <Marker position={destination} label={{ text: "B", color: "white" }} />}

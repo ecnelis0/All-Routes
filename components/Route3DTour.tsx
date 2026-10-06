@@ -35,6 +35,7 @@ import {
 } from "@/lib/tour/annotations";
 import type { StreetSpan } from "@/lib/tour/currentStreet";
 import type { LatLng } from "@/lib/types";
+import { ROUTE_PROFILES } from "@/lib/routing/cost";
 
 /**
  * Cinematic 3D fly-through of a route, over real aerial imagery and real
@@ -51,11 +52,12 @@ import type { LatLng } from "@/lib/types";
  * project's key) and what genuinely-real imagery we use instead.
  */
 
-const PROFILE_LABEL: Record<string, string> = {
-  fastest: "Fastest",
-  balanced: "Safer",
-  safest: "Safest",
-};
+// Must match the option names in the sidebar (ROUTE_PROFILES in
+// lib/routing/cost.ts) - these drifted once, and the tour called the
+// "Safest + bike lanes" route "Safest".
+const PROFILE_LABEL: Record<string, string> = Object.fromEntries(
+  Object.values(ROUTE_PROFILES).map((p) => [p.id, p.label])
+);
 
 interface Props {
   path: LatLng[];
@@ -583,7 +585,7 @@ export default function Route3DTour({
         <button
           type="button"
           onClick={onClose}
-          aria-label="Close 3D tour"
+          aria-label="Exit 3D tour"
           className="rounded-full border border-white/20 bg-slate-950/70 px-3 py-1.5 text-xs text-slate-200 backdrop-blur hover:bg-white/10"
         >
           Close

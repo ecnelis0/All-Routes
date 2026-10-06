@@ -4,7 +4,7 @@ import { useJsApiLoader } from "@react-google-maps/api";
 import dynamic from "next/dynamic";
 import { useEffect, useRef, useState } from "react";
 import AddressSearch from "@/components/AddressSearch";
-import MapView from "@/components/MapView";
+import MapView, { type MapRoute, type RoutePopup } from "@/components/MapView";
 // Loaded lazily: maplibre-gl is ~900KB and only needed when a tour opens.
 const Route3DTour = dynamic(() => import("@/components/Route3DTour"), { ssr: false });
 const NavigationView = dynamic(() => import("@/components/NavigationView"), { ssr: false });
@@ -15,6 +15,7 @@ import {
 } from "@/lib/data/sfDangerousNeighborhoods";
 import { DEMO_CITY } from "@/lib/mockData";
 import { buildManeuvers, formatDistance } from "@/lib/nav/instructions";
+import { describeRoute } from "@/lib/ui/routeDescription";
 import type { RouteSummary } from "@/lib/routing/service";
 import type {
   BikeLaneSegment,
@@ -114,6 +115,9 @@ export default function Home() {
   const [fewerSignals, setFewerSignals] = useState(false);
   const [tourOpen, setTourOpen] = useState(false);
   const [navSource, setNavSource] = useState<"gps" | "simulate" | null>(null);
+  /** Routes the rider took off the map. Reset by every new search. */
+  const [hiddenRoutes, setHiddenRoutes] = useState<RouteProfileId[]>([]);
+  const [routePopup, setRoutePopup] = useState<RoutePopup | null>(null);
   const [computingSafer, setComputingSafer] = useState(false);
   const [routingError, setRoutingError] = useState<string | null>(null);
 
@@ -158,6 +162,8 @@ export default function Home() {
     setRoutes({});
     setSelectedRouteKind("fastest");
     setConfirmed(false);
+    setHiddenRoutes([]);
+    setRoutePopup(null);
     setComputingSafer(false);
     setRoutingError(null);
   }
@@ -178,6 +184,8 @@ export default function Home() {
   ) {
     const requestId = ++routeRequestIdRef.current;
     setRoutes({});
+    setHiddenRoutes([]);
+    setRoutePopup(null);
     setSelectedRouteKind("fastest");
     setConfirmed(false);
     setRoutingError(null);
@@ -264,6 +272,13 @@ export default function Home() {
     if (!routes[kind]) return;
     setSelectedRouteKind(kind);
     setConfirmed(false);
+    // Choosing a route you removed puts it back - you asked to see it.
+    setHiddenRoutes((h) => h.filter((k) => k !== kind));
+  }
+
+  function removeRouteFromMap(kind: RouteProfileId) {
+    setHiddenRoutes((h) => (h.includes(kind) ? h : [...h, kind]));
+    setRoutePopup(null);
   }
 
   if (!apiKey) {
@@ -287,6 +302,17 @@ export default function Home() {
   }
 
   const activeRoute = routes[selectedRouteKind] ?? null;
+  const mapRoutes: MapRoute[] = ROUTE_TABS.flatMap((tab) => {
+    const route = routes[tab.kind];
+    if (!route || hiddenRoutes.includes(tab.kind)) return [];
+    return [
+      {
+        kind: tab.kind,
+        path: route.path,
+        description: describeRoute(route, estimateMinutes(route.distanceMeters)),
+      },
+    ];
+  });
   const hasBothEnds = Boolean(origin && destination);
 
   return (
@@ -431,7 +457,9 @@ export default function Home() {
                   >
                     <span className="flex flex-col">
                       <span className="font-medium">{route?.label ?? tab.label}</span>
-                      <span className="text-[10px] text-black/55">{tab.hint}</span>
+                      <span className="text-[10px] text-black/55">
+                        {route && hiddenRoutes.includes(tab.kind) ? "Removed from map \u00b7 click to show" : tab.hint}
+                      </span>
                     </span>
                     <span className="text-[11px] text-black">
                       {route
@@ -444,6 +472,16 @@ export default function Home() {
                 );
               })}
             </div>
+            {hiddenRoutes.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setHiddenRoutes([])}
+                className="self-start text-xs font-medium text-blue-700 hover:underline"
+              >
+                Show {hiddenRoutes.length === 1 ? "removed route" : `all ${hiddenRoutes.length} removed routes`} on map
+              </button>
+            )}
+            <p className="text-[10px] text-black/50">Tip: click any route on the map to see what kind it is.</p>
 
             {activeRoute && (
               <div className="flex flex-col gap-1 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-black">
@@ -592,11 +630,18 @@ export default function Home() {
 
             <button
               type="button"
-              onClick={() => setTourOpen(true)}
+              // Toggles: the sidebar stays visible beside the tour, so the
+              // same button that opened it is the natural way to close it.
+              onClick={() => setTourOpen((open) => !open)}
+              aria-pressed={tourOpen}
               disabled={!activeRoute || activeRoute.path.length < 2}
-              className="rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-black hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+              className={`rounded-md border px-3 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50 ${
+                tourOpen
+                  ? "border-slate-900 bg-slate-900 text-white hover:bg-slate-800"
+                  : "border-slate-300 bg-white text-black hover:bg-slate-50"
+              }`}
             >
-              View 3D tour
+              {tourOpen ? "Close 3D tour" : "View 3D tour"}
             </button>
             <button
               type="button"
@@ -657,7 +702,16 @@ export default function Home() {
           isLoaded={isLoaded}
           origin={origin}
           destination={destination}
-          selectedRoute={activeRoute ? { kind: selectedRouteKind, path: activeRoute.path } : null}
+          routes={mapRoutes}
+          selectedKind={activeRoute ? selectedRouteKind : null}
+          popup={routePopup}
+          onRouteClick={setRoutePopup}
+          onPopupClose={() => setRoutePopup(null)}
+          onSelectRoute={(kind) => {
+            selectRouteTab(kind);
+            setRoutePopup(null);
+          }}
+          onRemoveRoute={removeRouteFromMap}
           dangerZones={showNeighborhoodView ? (data?.dangerZones ?? []) : []}
           dangerousNeighborhoods={showNeighborhoodView ? SF_DANGEROUS_NEIGHBORHOODS : []}
         />

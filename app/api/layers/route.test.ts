@@ -43,5 +43,9 @@ describe("GET /api/layers", () => {
     expect(body.roadSegments[0]).toHaveProperty("score");
     expect(body.roadSegments[0]).toHaveProperty("kind");
     expect(body.roadSegments[0]).toHaveProperty("name");
-  });
+    // Building the zones from the real datasets (3,558 crashes x 5,566
+    // highway segments) takes ~2.7s alone and passes the default 5s limit
+    // when the whole suite runs in parallel. The route caches the result,
+    // so only the first request ever pays this.
+  }, 30_000);
 });
