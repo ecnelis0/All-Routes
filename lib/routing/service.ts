@@ -110,6 +110,35 @@ const SIGNAL_COST_METERS = 120;
  */
 const SIGNAL_MATCH_METERS = 18;
 
+// ---------------------------------------------------------------------------
+// RIDE TIME. One estimate used everywhere a time is shown AND by the Fastest
+// search, so "Fastest" means fastest by the same number the rider reads.
+//
+// Distance alone was the old estimate (3.6 m/s), and Fastest minimised
+// distance - while "Avoid hills" made it pay for climbing. Result, reported
+// on North Beach -> Lakeshore Plaza: Fastest took a flatter but LONGER
+// route than Safest, and the screen said Safest was quicker.
+export const CRUISE_MPS = 3.6;
+/**
+ * A metre climbed costs about as much time as this many metres of flat
+ * riding - the usual cycling rule of thumb is 8-12.
+ */
+export const CLIMB_FLAT_EQUIVALENT_M = 10;
+/** Average wait at a traffic light: roughly half the lights are red, ~25 s each. */
+export const SIGNAL_WAIT_SECONDS = 12;
+
+export function estimateSeconds(distanceMeters: number, climbedMeters: number, lights: number): number {
+  return (distanceMeters + CLIMB_FLAT_EQUIVALENT_M * climbedMeters) / CRUISE_MPS + SIGNAL_WAIT_SECONDS * lights;
+}
+
+/** The time cost of one edge beyond its length, in flat-equivalent metres - for the Fastest search. */
+function timePenaltyMeters(eng: RoutingEngine, edgeId: number): number {
+  return (
+    CLIMB_FLAT_EQUIVALENT_M * Math.max(0, eng.climbMeters[edgeId]) +
+    (edgeEntersSignal(eng, edgeId) ? SIGNAL_WAIT_SECONDS * CRUISE_MPS : 0)
+  );
+}
+
 /**
  * Flat-equivalent metres charged per metre of elevation CHANGE - climbed
  * or descended - when avoiding hills. The owner asked for "least change",
@@ -472,6 +501,8 @@ export interface RouteSummary {
    * much longer ride. Null on the fastest route and on modest detours.
    */
   detourWarning: { extraPercent: number; extraMeters: number; message: string } | null;
+  /** Estimated riding time: distance, climbing and traffic-light waits (see estimateSeconds). */
+  estimatedSeconds: number;
   /** Total metres climbed along the route - the "elevation gain" a rider feels. */
   elevationGainMeters: number;
   /** Steepest climbing block on the route, as a percentage grade. */
@@ -602,6 +633,18 @@ export function areaPolicy(eng: RoutingEngine, exempt: number, mode: AreaMode) {
       const priced = eng.areaMask[edgeId] & ~blockedBits;
       return priced ? eng.graph.edges[edgeId].lengthMeters * rateOf(priced) : 0;
     },
+  };
+}
+
+function detourWarningFor(routeMeters: number, baselineMeters: number): RouteSummary["detourWarning"] {
+  if (!(baselineMeters > 0 && routeMeters > baselineMeters * (1 + DETOUR_WARN_THRESHOLD))) return null;
+  const extra = routeMeters - baselineMeters;
+  return {
+    extraPercent: Math.round((extra / baselineMeters) * 1000) / 10,
+    extraMeters: Math.round(extra),
+    message: `This route is ${Math.round((extra / baselineMeters) * 100)}% longer than the fastest route (${(
+      extra / 1609.34
+    ).toFixed(1)} mi further) to stay clear of flagged areas and keep to protected lanes.`,
   };
 }
 
@@ -851,19 +894,8 @@ function summarize(
           ...route.edges.map((e) => elevation.nodeElevation![e.to]),
         ].map((m) => Math.round(m * 10) / 10)
       : [],
-    detourWarning:
-      baselineMeters > 0 && route.distanceMeters > baselineMeters * (1 + DETOUR_WARN_THRESHOLD)
-        ? {
-            extraPercent:
-              Math.round(((route.distanceMeters - baselineMeters) / baselineMeters) * 1000) / 10,
-            extraMeters: Math.round(route.distanceMeters - baselineMeters),
-            message: `This route is ${Math.round(
-              ((route.distanceMeters - baselineMeters) / baselineMeters) * 100
-            )}% longer than the fastest route (${(
-              (route.distanceMeters - baselineMeters) / 1609.34
-            ).toFixed(1)} mi further) to stay clear of flagged areas and keep to protected lanes.`,
-          }
-        : null,
+    detourWarning: detourWarningFor(route.distanceMeters, baselineMeters),
+    estimatedSeconds: Math.round(estimateSeconds(route.distanceMeters, gain, signalsSeen.size)),
     classSpans: classSpans.map((c) => ({
       roadClass: c.roadClass,
       startMeters: Math.round(c.startMeters),
@@ -987,7 +1019,9 @@ export function planRoutes(
       return findRoute(eng.graph, scoreOf, startNode, goalNode, p, {
         inFlaggedArea: policy.blocked,
         extraPenalty: (edgeId: number) =>
-          (extraPenalty ? extraPenalty(edgeId) : 0) + (p.avoidFlaggedAreas ? policy.penalty(edgeId) : 0),
+          (extraPenalty ? extraPenalty(edgeId) : 0) +
+          (p.avoidFlaggedAreas ? policy.penalty(edgeId) : 0) +
+          (p.id === "fastest" ? timePenaltyMeters(eng, edgeId) : 0),
       });
     };
 
@@ -1135,11 +1169,44 @@ function enforceSafetyOrdering(routes: RouteSummary[]): RouteSummary[] {
   // go the other way, so neither option ever gives up area avoidance.
   const balanced = byProfile.get("balanced");
   const safest = byProfile.get("safest");
-  if (balanced && safest && safest.distanceMeters < balanced.distanceMeters - 1) {
+  // ...nor FASTER - the time shown counts climbing and lights too.
+  if (
+    balanced &&
+    safest &&
+    (safest.distanceMeters < balanced.distanceMeters - 1 || safest.estimatedSeconds < balanced.estimatedSeconds - 1)
+  ) {
     if (safest.metersInFlaggedAreas <= balanced.metersInFlaggedAreas) {
       byProfile.set("balanced", adoptRoute(safest, "balanced"));
     } else {
       byProfile.set("safest", adoptRoute(balanced, "safest"));
+    }
+  }
+
+  // Fastest is never slower than a safer option. Fastest searches by the
+  // same time estimate, so this is a backstop for the cases its search
+  // still misses (it also pays for "Avoid hills" / "Fewer lights" choices,
+  // which are preferences, not time). A quicker safer route is a valid
+  // Fastest route - it has no constraints - so Fastest takes it.
+  const fastest = byProfile.get("fastest");
+  if (fastest) {
+    const quicker = (["balanced", "safest"] as const)
+      .map((id) => byProfile.get(id))
+      .filter((r): r is RouteSummary => r != null && r.estimatedSeconds < fastest.estimatedSeconds - 1)
+      .sort((a, b) => a.estimatedSeconds - b.estimatedSeconds)[0];
+    if (quicker) {
+      const adopted: RouteSummary = {
+        ...quicker,
+        profile: "fastest",
+        label: ROUTE_PROFILES.fastest.label,
+        areaTradeoff: null,
+        detourWarning: null,
+      };
+      byProfile.set("fastest", adopted);
+      // Detours are measured against Fastest, which just changed.
+      for (const id of ["balanced", "safest"] as const) {
+        const r = byProfile.get(id);
+        if (r) byProfile.set(id, { ...r, detourWarning: detourWarningFor(r.distanceMeters, adopted.distanceMeters) });
+      }
     }
   }
 
@@ -1221,7 +1288,9 @@ export function planCustomPath(
     return findRoute(eng.graph, scoreOf, from, to, p, {
       inFlaggedArea: policy.blocked,
       extraPenalty: (edgeId: number) =>
-        (extraPenalty ? extraPenalty(edgeId) : 0) + (p.avoidFlaggedAreas ? policy.penalty(edgeId) : 0),
+        (extraPenalty ? extraPenalty(edgeId) : 0) +
+        (p.avoidFlaggedAreas ? policy.penalty(edgeId) : 0) +
+        (p.id === "fastest" ? timePenaltyMeters(eng, edgeId) : 0),
     });
   };
 
@@ -1284,7 +1353,8 @@ export function summarizeCustom(
     findRoute(eng.graph, (edgeId: number) => eng.scores[edgeId], from, to, p, {
       extraPenalty: (edgeId: number) =>
         (avoidElevation ? eng.elevationPenalty[edgeId] : 0) +
-        (fewerSignals && edgeEntersSignal(eng, edgeId) ? SIGNAL_COST_METERS : 0),
+        (fewerSignals && edgeEntersSignal(eng, edgeId) ? SIGNAL_COST_METERS : 0) +
+        timePenaltyMeters(eng, edgeId),
     });
 
   // Avoidance claims and the detour warning are measured against the plain

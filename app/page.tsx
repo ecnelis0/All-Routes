@@ -17,6 +17,7 @@ import {
 import { DEMO_CITY } from "@/lib/mockData";
 import { buildManeuvers, formatDistance } from "@/lib/nav/instructions";
 import { describeRoute } from "@/lib/ui/routeDescription";
+import { rideMinutes, rideSeconds, type TimedRoute } from "@/lib/ui/rideTime";
 import { insertWaypoint } from "@/lib/ui/geometry";
 import { RouteChoiceList } from "@/components/RouteChoices";
 import RouteCompare from "@/components/RouteCompare";
@@ -53,7 +54,7 @@ interface LayersResponse {
 // carries its label too (with "best effort" appended when hard avoidance
 // had to be relaxed), and that takes precedence when shown.
 const ROUTE_TABS: { kind: RouteProfileId; label: string; hint: string }[] = [
-  { kind: "fastest", label: "Fastest", hint: "Shortest legal bike route" },
+  { kind: "fastest", label: "Fastest", hint: "Quickest ride, counting hills and red lights" },
   // Matches the area rules in lib/routing/service.ts (AREA_DETOUR_LIMIT).
   { kind: "balanced", label: "Safest", hint: "Never Severe areas; others unless the detour passes 40%" },
   { kind: "safest", label: "Safest + bike lanes", hint: "Same, and keeps to protected lanes" },
@@ -68,25 +69,16 @@ function secondsToMinutes(s: number): string {
 }
 
 /**
- * Minutes at a steady 13 km/h city-cycling average.
- *
- * The old number came from Google's Directions API, which modelled grades
- * and signals. Routing on our own graph means we no longer get that for
- * free, and a flat average over San Francisco's hills is genuinely rough -
- * it is labelled as an estimate in the UI rather than presented as a
- * prediction.
+ * Minutes from the router's estimate: distance, climbing and traffic-light
+ * waits (lib/ui/rideTime.ts). It is the same number "Fastest" minimises.
  */
-const CYCLING_METERS_PER_SECOND = 3.6;
-
-function estimateMinutes(meters: number): string {
-  return Math.max(1, Math.round(meters / CYCLING_METERS_PER_SECOND / 60)).toString();
+function estimateMinutes(route: TimedRoute): string {
+  return String(rideMinutes(route));
 }
 
 /** e.g. "+4 min" / "-2 min" / "same time" relative to the fastest route. */
 function timeDiffLabel(current: RouteSummary, baseline: RouteSummary): string {
-  const diffMin = Math.round(
-    (current.distanceMeters - baseline.distanceMeters) / CYCLING_METERS_PER_SECOND / 60
-  );
+  const diffMin = Math.round((rideSeconds(current) - rideSeconds(baseline)) / 60);
   if (diffMin === 0) return "same time";
   return diffMin > 0 ? `+${diffMin} min` : `${diffMin} min`;
 }
@@ -505,7 +497,7 @@ export default function Home() {
     );
   }
 
-  const describe = (route: RouteSummary) => describeRoute(route, estimateMinutes(route.distanceMeters));
+  const describe = (route: RouteSummary) => describeRoute(route, estimateMinutes(route));
   const selectedRoute = routeFor(selectedRouteKind);
   // While editing, the route on screen (and in the sidebar) is the edited
   // draft - or the original until the first stop is added.
@@ -677,7 +669,7 @@ export default function Home() {
                     </span>
                     <span className="text-[11px] text-black">
                       {route
-                        ? `${metersToMiles(route.distanceMeters)} mi \u00b7 ~${estimateMinutes(route.distanceMeters)} min`
+                        ? `${metersToMiles(route.distanceMeters)} mi \u00b7 ~${estimateMinutes(route)} min`
                         : computingSafer
                           ? "Computing\u2026"
                           : "\u2014"}
@@ -908,7 +900,7 @@ export default function Home() {
                 </div>
                 <div className="flex justify-between">
                   <span>Est. time</span>
-                  <span className="font-medium">~{estimateMinutes(activeRoute.distanceMeters)} min</span>
+                  <span className="font-medium">~{estimateMinutes(activeRoute)} min</span>
                 </div>
                 {selectedRouteKind !== "fastest" && routes.fastest && (
                   <div className="flex justify-between">

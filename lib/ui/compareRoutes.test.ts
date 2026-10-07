@@ -43,7 +43,8 @@ describe("compareRoutes", () => {
 
   it("gives 'best for' badges, never one every route shares", () => {
     const badges = bestForBadges(rows, 3);
-    expect(badges[0]).toEqual(["Shortest"]);
+    // No time estimate on these -> distance stands in, so the shortest is also the quickest.
+    expect(badges[0]).toEqual(["Quickest", "Shortest"]);
     expect(badges[1]).toEqual(["Safest"]);
     expect(badges[2]).toEqual(["Most protected", "Flattest", "Fewest lights"]);
   });

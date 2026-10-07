@@ -1,3 +1,5 @@
+import { rideSeconds } from "./rideTime";
+
 /**
  * Side-by-side comparison of every route on offer: one row per statistic,
  * the best value in each row marked, and "best for ..." badges.
@@ -19,6 +21,7 @@ export interface ComparableRoute {
   maxGradePercent: number;
   maxDownGradePercent: number;
   metersInFlaggedAreas: number;
+  estimatedSeconds?: number;
 }
 
 export interface CompareRow {
@@ -42,6 +45,12 @@ const ROWS: {
   better: Better;
 }[] = [
   { label: "Distance", value: (r) => r.distanceMeters, format: (v) => `${(v / MI).toFixed(1)} mi`, better: "lower" },
+  {
+    label: "Est. time",
+    value: (r) => rideSeconds(r),
+    format: (v) => `~${Math.max(1, Math.round(v / 60))} min`,
+    better: "lower",
+  },
   { label: "Danger (avg)", value: (r) => r.meanDanger, format: (v) => v.toFixed(1), better: "lower" },
   { label: "Worst street", value: (r) => r.maxDanger, format: (v) => v.toFixed(0), better: "lower" },
   { label: "On protected lanes", value: (r) => r.protectedLaneFraction, format: (v) => `${Math.round(v * 100)}%`, better: "higher" },
@@ -81,6 +90,7 @@ export function compareRoutes(routes: ComparableRoute[]): CompareRow[] {
 }
 
 const BADGES: { label: string; row: string }[] = [
+  { label: "Quickest", row: "Est. time" },
   { label: "Shortest", row: "Distance" },
   { label: "Safest", row: "Danger (avg)" },
   { label: "Most protected", row: "On protected lanes" },

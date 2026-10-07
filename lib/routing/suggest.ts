@@ -1,6 +1,9 @@
 import {
   areaTier,
+  CLIMB_FLAT_EQUIVALENT_M,
+  CRUISE_MPS,
   edgeEntersSignal,
+  SIGNAL_WAIT_SECONDS,
   exemptAreaBits,
   getRoutingEngine,
   MAX_CUSTOM_WAYPOINTS,
@@ -37,8 +40,8 @@ import type { LatLng } from "../types";
  * (unless the trip starts or ends there), whatever time it would save.
  */
 
-/** Same cycling speed the sidebar's time estimates use. */
-export const CYCLING_MPS = 3.6;
+/** Same time model as every time shown in the app (see estimateSeconds). */
+export const CYCLING_MPS = CRUISE_MPS;
 /** A suggestion may cost at most this much extra time for a non-time benefit. */
 export const MAX_ADDED_MINUTES = 5;
 /** At most this many suggestions - more is noise, not help. */
@@ -180,7 +183,11 @@ interface Scored {
  * rider's attention.
  */
 export function judge(base: SectionStats, cand: SectionStats, via: string): Scored | null {
-  const minutes = (cand.meters - base.meters) / CYCLING_MPS / 60;
+  // Same model as the route totals, so "save 8 min" adds up with them.
+  const minutes =
+    ((cand.meters - base.meters + CLIMB_FLAT_EQUIVALENT_M * (cand.climb - base.climb)) / CRUISE_MPS +
+      SIGNAL_WAIT_SECONDS * (cand.lights - base.lights)) /
+    60;
   const climb = cand.climb - base.climb;
   const mb = mean(base);
   const mc = mean(cand);

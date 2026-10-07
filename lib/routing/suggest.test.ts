@@ -37,7 +37,8 @@ describe("judge", () => {
   it("states a time saving and its cost in climbing", () => {
     const v = judge(stats({ meters: 2000, dangerMeters: 50_000 }), stats({ meters: 1000, climb: 40, dangerMeters: 25_000 }), "via Noe Street")!;
     expect(v.kind).toBe("faster");
-    expect(v.headline).toBe("Save 5 min via Noe Street - costs +131 ft climbing");
+    // 1 km shorter but 40 m more climbing: 1000 - 10 x 40 = 600 m flat-equivalent, ~3 min.
+    expect(v.headline).toBe("Save 3 min via Noe Street - costs +131 ft climbing");
   });
 
   it("says 'no downside' when the stretch is simply better", () => {
@@ -50,7 +51,8 @@ describe("judge", () => {
   });
 
   it("refuses edits that add a lot of time for a small comfort gain", () => {
-    const longer = (MAX_ADDED_MINUTES + 2) * 60 * 3.6 + 1000;
+    // Long enough to add > MAX_ADDED_MINUTES even after the 60 m of climbing it saves.
+    const longer = (MAX_ADDED_MINUTES + 5) * 60 * 3.6 + 1000;
     expect(judge(stats({ climb: 60 }), stats({ meters: longer, climb: 0, dangerMeters: longer * 50 }), "x")).toBeNull();
   });
 });
@@ -126,8 +128,13 @@ describe("suggestions are measured against the route on screen", () => {
     // the bug (both planners agreed); with it off, the old edit planner
     // gave 7.7 km through 1.2 km of flagged area vs Safest's 8.9 km and 0.
     for (const o of [opts, {}]) {
-      const stock = planRoutes(A, B, o).find((r) => r.profile === "balanced")!;
-      const mine = planCustomRoute(A, B, [], "balanced", o);
+      const rs = planRoutes(A, B, o);
+      const stock = rs.find((r) => r.profile === "balanced")!;
+      const bikeLanes = rs.find((r) => r.profile === "safest")!;
+      // When "Safest + bike lanes" came out quicker, Safest takes its route
+      // (it may never be faster than Safest) - then that is what to match.
+      const equalised = stock.distanceMeters === bikeLanes.distanceMeters;
+      const mine = planCustomRoute(A, B, [], equalised ? "safest" : "balanced", o);
       expect(Math.abs(mine.distanceMeters - stock.distanceMeters)).toBeLessThan(2);
       expect(mine.metersInFlaggedAreas).toBe(stock.metersInFlaggedAreas);
     }

@@ -55,6 +55,8 @@ export interface NavRoute {
   profile: string;
   streetSpans: StreetSpanLike[];
   pathElevations?: number[];
+  /** Router time estimate (climbing and lights included), for the ETA. */
+  estimatedSeconds?: number;
 }
 
 interface Props {
@@ -256,6 +258,7 @@ export default function NavigationView({
           profile: next.profile,
           streetSpans: next.streetSpans,
           pathElevations: next.pathElevations,
+          estimatedSeconds: next.estimatedSeconds,
         });
         setRerouteCount((n) => n + 1);
         // The old match describes the old line (still "off route"); drop it
@@ -474,6 +477,14 @@ export default function NavigationView({
   // maneuvers[1] there put the very first instruction back up on arrival.
   const next: Maneuver | null = match ? match.next : (maneuvers[1] ?? null);
   const toNext = match ? match.metersToNext : (next?.atMeters ?? 0);
+  // The ETA uses the router's own estimate (hills and red lights
+  // included) as an average speed for this route, so it agrees with the
+  // time shown before setting off.
+  const routeMeters = cum[cum.length - 1] ?? 0;
+  const etaSpeed =
+    route.estimatedSeconds && route.estimatedSeconds > 0 && routeMeters > 0
+      ? routeMeters / route.estimatedSeconds
+      : CRUISE_SPEED_MPS;
   const remaining = match ? match.metersRemaining : cum[cum.length - 1];
   // "Then ..." preview when two maneuvers come in quick succession.
   const after = next ? maneuvers[maneuvers.indexOf(next) + 1] : undefined;
@@ -484,7 +495,7 @@ export default function NavigationView({
     fixTime === null
       ? null
       : new Date(
-          fixTime + (remaining / CRUISE_SPEED_MPS) * 1000,
+          fixTime + (remaining / etaSpeed) * 1000,
         ).toLocaleTimeString([], {
           hour: "numeric",
           minute: "2-digit",
@@ -565,7 +576,7 @@ export default function NavigationView({
         <div className="flex items-center justify-between gap-3">
           <div>
             <p className="text-xl font-bold" data-testid="nav-eta">
-              {formatEta(remaining)}
+              {formatEta(remaining, etaSpeed)}
             </p>
             <p className="text-xs text-slate-600">
               {formatDistance(remaining)}

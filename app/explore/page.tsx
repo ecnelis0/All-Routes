@@ -11,6 +11,7 @@ import { shortPlace } from "@/lib/saved/store";
 import { emojiFor, INTERESTS, type InterestId, type InterestRide } from "@/lib/interests/catalog";
 import type { RouteSummary } from "@/lib/routing/service";
 import { describeRoute } from "@/lib/ui/routeDescription";
+import { rideMinutes } from "@/lib/ui/rideTime";
 import type { LatLng } from "@/lib/types";
 
 const NavigationView = dynamic(() => import("@/components/NavigationView"), { ssr: false });
@@ -24,8 +25,6 @@ const NavigationView = dynamic(() => import("@/components/NavigationView"), { ss
 // Must match the loader options on "/" exactly - the Google loader is a
 // singleton and refuses a second, different configuration.
 const LIBRARIES: [] = [];
-const MPS = 3.6;
-const minutes = (m: number) => Math.max(1, Math.round(m / MPS / 60));
 const miles = (m: number) => (m / 1609.34).toFixed(1);
 
 type Ride = InterestRide & { route: RouteSummary };
@@ -81,7 +80,7 @@ export default function ExplorePage() {
   // The description's "stops you chose" line is for hand-edited routes;
   // these stops were picked for the rider, so it is left off here.
   const description = ride
-    ? describeRoute({ ...ride.route, customWaypoints: undefined }, String(minutes(ride.route.distanceMeters)))
+    ? describeRoute({ ...ride.route, customWaypoints: undefined }, String(rideMinutes(ride.route)))
     : null;
   const places: MapPlace[] = ride
     ? [
@@ -181,7 +180,7 @@ export default function ExplorePage() {
                     </span>
                   </span>
                   <span className="text-[11px]">
-                    {miles(r.route.distanceMeters)} mi · ~{minutes(r.route.distanceMeters)} min
+                    {miles(r.route.distanceMeters)} mi · ~{rideMinutes(r.route)} min
                   </span>
                 </button>
               ))}

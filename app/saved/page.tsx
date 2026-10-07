@@ -15,6 +15,7 @@ import { useSavedRoutes } from "@/lib/saved/useSavedRoutes";
 import { buildElevationProfile } from "@/lib/tour/elevationProfile";
 import { compareRoutes } from "@/lib/ui/compareRoutes";
 import { describeRoute } from "@/lib/ui/routeDescription";
+import { rideMinutes } from "@/lib/ui/rideTime";
 
 const Route3DTour = dynamic(() => import("@/components/Route3DTour"), { ssr: false });
 const NavigationView = dynamic(() => import("@/components/NavigationView"), { ssr: false });
@@ -27,8 +28,6 @@ const NavigationView = dynamic(() => import("@/components/NavigationView"), { ss
 
 // Must match the loader options on the other pages exactly.
 const LIBRARIES: [] = [];
-const MPS = 3.6;
-const minutes = (m: number) => Math.max(1, Math.round(m / MPS / 60));
 const miles = (m: number) => (m / 1609.34).toFixed(1);
 const ft = (m: number) => Math.round(Math.round(m) * 3.281);
 
@@ -39,7 +38,7 @@ function kindOf(s: SavedRoute): MapRouteKind {
 function describe(s: SavedRoute) {
   // Explore stops were picked for the rider, not placed by hand.
   const r = s.source === "explore" ? { ...s.route, customWaypoints: undefined } : s.route;
-  return describeRoute(r, String(minutes(s.route.distanceMeters)));
+  return describeRoute(r, String(rideMinutes(s.route)));
 }
 
 function when(iso: string): string {
@@ -190,7 +189,7 @@ function List({ saved, onOpen }: { saved: SavedRoute[]; onOpen: (id: string) => 
                     {shortPlace(s.from.label)} → {shortPlace(s.to.label)} · saved {when(s.savedAt)}
                   </span>
                   <span className="text-xs">
-                    {miles(s.route.distanceMeters)} mi · ~{minutes(s.route.distanceMeters)} min · danger{" "}
+                    {miles(s.route.distanceMeters)} mi · ~{rideMinutes(s.route)} min · danger{" "}
                     {s.route.meanDanger} · ▲ {ft(s.route.elevationGainMeters)} ft · {s.route.trafficSignals} lights
                   </span>
                   {prof && <ProfileChart profile={prof} width={340} height={32} fill="rgba(59,130,246,0.45)" />}
@@ -313,10 +312,6 @@ function Detail({
         <h2 className="mb-1 font-semibold">The numbers</h2>
         <table className="w-full">
           <tbody>
-            <tr className="border-t border-slate-100">
-              <td className="py-1 text-black/70">Est. time</td>
-              <td className="py-1 text-right font-medium">~{minutes(r.distanceMeters)} min</td>
-            </tr>
             {rows.map((row) => (
               <tr key={row.label} className="border-t border-slate-100">
                 <td className="py-1 text-black/70">{row.label}</td>
