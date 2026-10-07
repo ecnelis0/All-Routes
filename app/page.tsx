@@ -18,6 +18,7 @@ import { buildManeuvers, formatDistance } from "@/lib/nav/instructions";
 import { describeRoute } from "@/lib/ui/routeDescription";
 import { insertWaypoint } from "@/lib/ui/geometry";
 import { RouteChoiceList } from "@/components/RouteChoices";
+import RouteCompare from "@/components/RouteCompare";
 import type { RouteSummary } from "@/lib/routing/service";
 import type {
   BikeLaneSegment,
@@ -128,6 +129,7 @@ export default function Home() {
    * toured, navigated or edited. "Show all routes" goes back.
    */
   const [focused, setFocused] = useState(false);
+  const [compareOpen, setCompareOpen] = useState(false);
   /** The rider's saved, edited route ("My route"). */
   const [customRoute, setCustomRoute] = useState<RouteSummary | null>(null);
   // Edit mode. The route being edited is planned with `editProfile`'s
@@ -188,6 +190,7 @@ export default function Home() {
     setHiddenRoutes([]);
     setRoutePopup(null);
     setFocused(false);
+    setCompareOpen(false);
     setCustomRoute(null);
     exitEditing();
     setComputingSafer(false);
@@ -342,6 +345,7 @@ export default function Home() {
   function startEditing() {
     const base = routeFor(selectedRouteKind);
     if (!base) return;
+    setCompareOpen(false);
     setEditProfile(base.profile);
     setEditOriginal(base);
     // Editing "My route" again continues from its stops.
@@ -624,6 +628,23 @@ export default function Home() {
                 className="self-start text-xs font-medium text-blue-700 hover:underline"
               >
                 Show {hiddenRoutes.length === 1 ? "removed route" : `all ${hiddenRoutes.length} removed routes`} on map
+              </button>
+            )}
+            {!editing && tabs.filter((t) => routeFor(t.kind)).length >= 2 && (
+              <button
+                type="button"
+                onClick={() => {
+                  setCompareOpen((o) => !o);
+                  setTourOpen(false);
+                }}
+                aria-pressed={compareOpen}
+                className={`rounded-md border px-3 py-2 text-sm font-medium ${
+                  compareOpen
+                    ? "border-slate-900 bg-slate-900 text-white hover:bg-slate-800"
+                    : "border-slate-300 bg-white text-black hover:bg-slate-50"
+                }`}
+              >
+                {compareOpen ? "Close comparison" : "Compare routes side by side"}
               </button>
             )}
             {!focused && (
@@ -925,7 +946,10 @@ export default function Home() {
               type="button"
               // Toggles: the sidebar stays visible beside the tour, so the
               // same button that opened it is the natural way to close it.
-              onClick={() => setTourOpen((open) => !open)}
+              onClick={() => {
+                setTourOpen((open) => !open);
+                setCompareOpen(false);
+              }}
               aria-pressed={tourOpen}
               disabled={editing || !activeRoute || activeRoute.path.length < 2}
               title={editing ? "Save or cancel your edit first" : undefined}
@@ -1015,6 +1039,19 @@ export default function Home() {
           dangerZones={showNeighborhoodView ? (data?.dangerZones ?? []) : []}
           dangerousNeighborhoods={showNeighborhoodView ? SF_DANGEROUS_NEIGHBORHOODS : []}
         />
+        {compareOpen && !editing && (
+          <RouteCompare
+            items={tabs.flatMap((t) => {
+              const route = routeFor(t.kind);
+              return route ? [{ kind: t.kind, route, description: describe(route) }] : [];
+            })}
+            onSelect={(kind) => {
+              selectRoute(kind);
+              setCompareOpen(false);
+            }}
+            onClose={() => setCompareOpen(false)}
+          />
+        )}
         {tourOpen && activeRoute && (
           <Route3DTour
             path={activeRoute.path}

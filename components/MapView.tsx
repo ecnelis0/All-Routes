@@ -151,7 +151,7 @@ const ROAD_WIDTH_BY_KIND: Record<RoadKind, number> = {
 // Fastest stays a neutral gray - it's the baseline we compare against, not
 // a recommendation. Safer is amber (a reasonable middle ground), safest is
 // green (safety above all else).
-const ROUTE_COLOR_BY_KIND: Record<MapRouteKind, string> = {
+export const ROUTE_COLOR_BY_KIND: Record<MapRouteKind, string> = {
   fastest: "#64748b",
   balanced: "#f59e0b",
   safest: "#16a34a",

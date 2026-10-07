@@ -1,7 +1,7 @@
 "use client";
 
-import { useId, useMemo } from "react";
 import { sampleElevation, type ElevationProfile } from "@/lib/tour/elevationProfile";
+import ProfileChart from "@/components/ProfileChart";
 
 /**
  * Live elevation readout for the 3D tour: height here, the grade right
@@ -30,18 +30,8 @@ function gradeColor(g: number): string {
 }
 
 export default function ElevationPanel({ profile, meters }: { profile: ElevationProfile; meters: number }) {
-  const clipId = useId();
   const s = sampleElevation(profile, meters);
-  const range = Math.max(1, profile.maxElev - profile.minElev);
-  const x = (m: number) => (m / Math.max(1, profile.totalMeters)) * W;
-  const y = (e: number) => H - 2 - ((e - profile.minElev) / range) * (H - 6);
 
-  // The profile shape is fixed for the route; only the marker moves.
-  const area = useMemo(() => {
-    const pts = profile.cum.map((c, i) => `${x(c).toFixed(1)},${y(profile.elev[i]).toFixed(1)}`);
-    return `M0,${H} L${pts.join(" L")} L${W},${H} Z`;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [profile]);
 
   const total = profile.gainTo[profile.gainTo.length - 1];
   const totalDrop = profile.lossTo[profile.lossTo.length - 1];
@@ -61,17 +51,9 @@ export default function ElevationPanel({ profile, meters }: { profile: Elevation
           {arrow} {Math.abs(g).toFixed(1)}%
         </span>
       </div>
-      <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} className="mt-1 block" aria-hidden>
-        <defs>
-          <clipPath id={clipId}>
-            <rect x={0} y={0} width={x(meters)} height={H} />
-          </clipPath>
-        </defs>
-        <path d={area} fill="rgba(148,163,184,0.25)" />
-        <path d={area} fill="rgba(56,189,248,0.55)" clipPath={`url(#${clipId})`} />
-        <line x1={x(meters)} x2={x(meters)} y1={0} y2={H} stroke="white" strokeOpacity={0.5} />
-        <circle cx={x(meters)} cy={y(s.elevation)} r={3.5} fill="white" />
-      </svg>
+      <div className="mt-1">
+        <ProfileChart profile={profile} width={W} height={H} progressMeters={meters} />
+      </div>
       <div className="mt-1 flex justify-between text-[11px] tabular-nums text-slate-300">
         <span data-testid="elevation-gained">
           ▲ {ft(s.gained)} <span className="text-slate-500">/ {ft(total)} ft</span>
