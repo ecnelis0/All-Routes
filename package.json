@@ -16,6 +16,7 @@
     "prepare-assets": "node scripts/copyMaplibreWorker.mjs",
     "render:tour": "node scripts/renderTour.mjs",
     "data:fetch-elevation": "node scripts/fetchSfElevation.mjs",
+    "data:fetch-pois": "node scripts/fetchSfPois.mjs",
     "data:import-crashes": "node scripts/importSfBikeCrashes.mjs",
     "data:import-signals": "node scripts/importTrafficSignals.mjs"
   },

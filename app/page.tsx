@@ -2,6 +2,7 @@
 
 import { useJsApiLoader } from "@react-google-maps/api";
 import dynamic from "next/dynamic";
+import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import AddressSearch from "@/components/AddressSearch";
 import MapView, { type MapRoute, type MapRouteKind, type RoutePopup } from "@/components/MapView";
@@ -537,6 +538,12 @@ export default function Home() {
         <div>
           <h1 className="text-lg font-bold text-black">🚲 Safe Route</h1>
           <p className="mt-1 text-xs text-black">San Francisco, CA</p>
+          <Link
+            href="/explore"
+            className="mt-2 inline-block rounded-full border border-teal-600 px-3 py-1 text-xs font-semibold text-teal-700 hover:bg-teal-50"
+          >
+            Explore rides by what you like →
+          </Link>
         </div>
 
         <section className="flex flex-col gap-2">

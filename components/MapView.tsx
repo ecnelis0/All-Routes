@@ -28,6 +28,15 @@ export interface SelectedRouteDisplay {
   path: LatLng[];
 }
 
+export interface MapPlace {
+  id: string;
+  name: string;
+  emoji: string;
+  position: LatLng;
+  /** 1-based visiting order for stops; absent for places merely passed. */
+  stopNumber?: number;
+}
+
 export interface MapSuggestion {
   id: string;
   label: string;
@@ -105,6 +114,12 @@ interface MapViewProps {
   openSuggestionId?: string | null;
   onOpenSuggestion?: (id: string | null) => void;
   onUseSuggestion?: (id: string) => void;
+  /**
+   * Labelled places (interest routes): stops the route visits get a
+   * numbered chip with their name; places it merely passes get a small
+   * emoji marker with the name on hover, so forty of them stay readable.
+   */
+  places?: MapPlace[];
   /**
    * "Neighborhood view" - translucent circles over the same danger zones
    * used for route-risk scoring (see `computeCompositeDangerZones`). Not
@@ -220,6 +235,7 @@ export default function MapView({
   onMoveStop,
   onRemoveStop,
   suggestions = [],
+  places = [],
   openSuggestionId = null,
   onOpenSuggestion,
   onUseSuggestion,
@@ -583,6 +599,35 @@ export default function MapView({
           zIndex={1000}
           onClick={() => onOpenSuggestion?.(sg.id === openSuggestionId ? null : sg.id)}
         />
+      ))}
+
+      {places.map((pl) => (
+        <OverlayViewF
+          key={`place-${pl.id}`}
+          position={pl.position}
+          mapPaneName="overlayMouseTarget"
+          getPixelPositionOffset={(w, h) => ({ x: -(w / 2), y: -h - 4 })}
+        >
+          {pl.stopNumber !== undefined ? (
+            <span
+              className="flex items-center gap-1 whitespace-nowrap rounded-full border-2 border-teal-600 bg-white px-2 py-0.5 text-[11px] font-semibold text-slate-900 shadow"
+              data-testid="place-stop"
+            >
+              <span className="flex h-4 w-4 items-center justify-center rounded-full bg-teal-600 text-[10px] text-white">
+                {pl.stopNumber}
+              </span>
+              {pl.emoji} {pl.name}
+            </span>
+          ) : (
+            <span
+              title={pl.name}
+              className="block rounded-full bg-white/90 px-1 text-[13px] leading-5 shadow"
+              data-testid="place-along"
+            >
+              {pl.emoji}
+            </span>
+          )}
+        </OverlayViewF>
       ))}
 
       {origin && <MarkerF position={origin} label={{ text: "A", color: "white" }} />}

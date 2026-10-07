@@ -56,6 +56,20 @@ After choosing a route, press **Confirm route**, then:
   change speed, and **Go off route** to check rerouting. Works on any desktop.
 - **Start navigation**: live GPS from the browser's geolocation API.
 
+### Explore rides (by interest)
+
+`/explore` (or "Explore rides by what you like" on the main page) plans a ride
+around what you like: beaches, boba, coffee, food, parks, views, street art, or
+bike paths. Pick interests and two addresses; you get a **Quick** ride (up to 2
+stops, ~15% extra distance) and a **Relaxed** one (up to 5 stops, ~45%). Stops
+are numbered on the map and other matching places along the way are marked.
+Every leg follows the same safety rules as the main router (no Severe areas),
+and navigation/GPS work the same way.
+
+Places come from OpenStreetMap (`npm run data:fetch-pois`), which has names and
+positions but no ratings. A planned AI step will let you describe the ride in
+your own words and use Google Maps data to choose places that are actually good.
+
 ### Testing GPS on a phone
 
 Browsers only share location with a **secure** page: `https://...`, or
