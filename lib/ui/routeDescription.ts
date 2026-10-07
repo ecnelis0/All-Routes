@@ -28,6 +28,8 @@ export interface DescribableRoute {
   areaTradeoff?: { avoidAllExtraPercent: number | null; limitPercent: number } | null;
   /** Present only on a route the rider edited. */
   customWaypoints?: unknown[];
+  /** Suggested edits the rider accepted - each may knowingly break a setting. */
+  acceptedSuggestions?: string[];
 }
 
 export interface RouteDescription {
@@ -101,6 +103,9 @@ export function describeRoute(route: DescribableRoute, minutes: string): RouteDe
       text: n > 0 ? `Your edited route · passes ${n} stop${n === 1 ? "" : "s"} you chose` : "Your edited route",
       honoured: true,
     });
+  }
+  for (const a of route.acceptedSuggestions ?? []) {
+    choices.push({ text: `You chose: ${a}`, honoured: true });
   }
 
   if (route.profile === "fastest") {

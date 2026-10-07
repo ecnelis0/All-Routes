@@ -28,6 +28,19 @@ export interface SelectedRouteDisplay {
   path: LatLng[];
 }
 
+export interface MapSuggestion {
+  id: string;
+  label: string;
+  headline: string;
+  gains: string[];
+  costs: string[];
+  checkpoint: LatLng;
+  sectionPath: LatLng[];
+  replacedPath: LatLng[];
+}
+
+const SUGGESTION_COLOR = "#ea580c";
+
 /** The three standard options plus the rider's own edited route. */
 export type MapRouteKind = SelectedRouteDisplay["kind"] | "custom";
 
@@ -83,6 +96,15 @@ interface MapViewProps {
   onAddStop?: (at: LatLng) => void;
   onMoveStop?: (index: number, to: LatLng) => void;
   onRemoveStop?: (index: number) => void;
+  /**
+   * Suggested edits (edit mode, on request only): a checkpoint per
+   * suggestion; the open one also draws its alternative stretch beside the
+   * stretch it would replace.
+   */
+  suggestions?: MapSuggestion[];
+  openSuggestionId?: string | null;
+  onOpenSuggestion?: (id: string | null) => void;
+  onUseSuggestion?: (id: string) => void;
   /**
    * "Neighborhood view" - translucent circles over the same danger zones
    * used for route-risk scoring (see `computeCompositeDangerZones`). Not
@@ -197,6 +219,10 @@ export default function MapView({
   onAddStop,
   onMoveStop,
   onRemoveStop,
+  suggestions = [],
+  openSuggestionId = null,
+  onOpenSuggestion,
+  onUseSuggestion,
   dangerZones = [],
   dangerousNeighborhoods = [],
   roadSegments = [],
@@ -483,6 +509,81 @@ export default function MapView({
             }}
           />
         ))}
+
+      {(() => {
+        const open = suggestions.find((x) => x.id === openSuggestionId);
+        if (!open) return null;
+        return (
+          <>
+            {/* What it would replace: the current stretch, struck through in red. */}
+            <PolylineF
+              path={open.replacedPath}
+              options={{ strokeColor: "#dc2626", strokeOpacity: 0.7, strokeWeight: 7, clickable: false, zIndex: 34 }}
+            />
+            <PolylineF
+              path={open.sectionPath}
+              options={{ strokeColor: SUGGESTION_COLOR, strokeOpacity: 0.95, strokeWeight: 7, clickable: false, zIndex: 35 }}
+            />
+            <InfoWindowF position={open.checkpoint} onCloseClick={() => onOpenSuggestion?.(null)}>
+              <div className="flex max-w-64 flex-col gap-1.5 text-xs text-slate-900" data-testid="suggestion-popup">
+                <p className="text-sm font-semibold">
+                  <span className="mr-1 rounded bg-orange-600 px-1.5 py-0.5 text-[10px] text-white">{open.label}</span>
+                  {open.headline.split(" - ")[0]}
+                </p>
+                <ul className="flex flex-col gap-0.5">
+                  {open.gains.map((g) => (
+                    <li key={g} className="text-emerald-700">
+                      ✓ {g}
+                    </li>
+                  ))}
+                  {open.costs.map((c) => (
+                    <li key={c} className="text-slate-600">
+                      ✕ {c}
+                    </li>
+                  ))}
+                  {open.costs.length === 0 && <li className="text-emerald-700">✓ no downside</li>}
+                </ul>
+                <p className="text-[10px] text-slate-500">Orange: the new way. Red: the part of your route it replaces.</p>
+                <div className="flex gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => onUseSuggestion?.(open.id)}
+                    className="rounded bg-orange-600 px-2 py-1 font-semibold text-white"
+                  >
+                    Use this
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onOpenSuggestion?.(null)}
+                    className="rounded border border-slate-300 px-2 py-1 font-medium"
+                  >
+                    Not now
+                  </button>
+                </div>
+              </div>
+            </InfoWindowF>
+          </>
+        );
+      })()}
+
+      {suggestions.map((sg) => (
+        <MarkerF
+          key={`sg-${sg.id}`}
+          position={sg.checkpoint}
+          title={sg.headline}
+          label={{ text: sg.label, color: "white", fontWeight: "700", fontSize: "11px" }}
+          icon={{
+            path: 0, // google.maps.SymbolPath.CIRCLE
+            scale: 13,
+            fillColor: SUGGESTION_COLOR,
+            fillOpacity: sg.id === openSuggestionId ? 1 : 0.9,
+            strokeColor: "#ffffff",
+            strokeWeight: 2,
+          }}
+          zIndex={1000}
+          onClick={() => onOpenSuggestion?.(sg.id === openSuggestionId ? null : sg.id)}
+        />
+      ))}
 
       {origin && <MarkerF position={origin} label={{ text: "A", color: "white" }} />}
       {destination && <MarkerF position={destination} label={{ text: "B", color: "white" }} />}

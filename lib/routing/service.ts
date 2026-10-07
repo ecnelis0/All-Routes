@@ -9,7 +9,7 @@ import { applySfmtaLaneTiers, type LaneMatchStats } from "../scoring/laneMatch";
 import { buildFeatureContext, extractFeatures } from "../scoring/features";
 import { createBaselineModel, PrecomputedScoreModel, type SafetyModel } from "../scoring/model";
 import { loadModelArtifact } from "../scoring/artifact";
-import { decodeGraph, NodeSpatialIndex, type BikeGraph } from "./graph";
+import { decodeGraph, NodeSpatialIndex, type BikeGraph, type GraphEdge } from "./graph";
 import { findRoute, type RoutePath } from "./astar";
 import { ROUTE_PROFILES, type RouteProfile } from "./cost";
 import rawGraph from "../data/sfBikeGraph.json";
@@ -502,6 +502,13 @@ export interface RouteSummary {
    * between each pair of stops - editing picks where to go, not how.
    */
   customWaypoints?: LatLng[];
+  /**
+   * Suggested edits the rider accepted on this route, as their headlines
+   * ("Save 4 min via Castro Street - costs +120 ft climbing"). A suggestion
+   * can knowingly break a setting - a faster section that climbs although
+   * "Avoid hills" is on - so the route has to say so.
+   */
+  acceptedSuggestions?: string[];
 }
 
 /** Above this much extra distance versus the fastest route, say so plainly. */
@@ -572,7 +579,7 @@ function areaBits(p: LatLng): number {
 }
 
 /** Areas containing any of these points - unavoidable, so exempt from blocking. */
-function exemptAreaBits(points: LatLng[]): number {
+export function exemptAreaBits(points: LatLng[]): number {
   return points.reduce((m, p) => m | areaBits(p), 0);
 }
 
@@ -1161,6 +1168,24 @@ export function planCustomRoute(
   profileId: RouteProfile["id"],
   options: PlanOptions = {}
 ): RouteSummary {
+  return summarizeCustom(planCustomPath(origin, destination, waypoints, profileId, options), waypoints, profileId, options);
+}
+
+/** The joined route itself, before it is summarised - see planCustomRoute. */
+export interface CustomPlan {
+  path: RoutePath;
+  bestEffort: boolean;
+  /** Snapped graph nodes: start, each stop, destination. */
+  stops: number[];
+}
+
+export function planCustomPath(
+  origin: LatLng,
+  destination: LatLng,
+  waypoints: LatLng[],
+  profileId: RouteProfile["id"],
+  options: PlanOptions = {}
+): CustomPlan {
   if (waypoints.length > MAX_CUSTOM_WAYPOINTS) {
     throw new RoutingError(`At most ${MAX_CUSTOM_WAYPOINTS} stops can be added to a route.`);
   }
@@ -1189,11 +1214,9 @@ export function planCustomRoute(
           (avoidElevation ? eng.elevationPenalty[edgeId] : 0) +
           (fewerSignals && edgeEntersSignal(eng, edgeId) ? SIGNAL_COST_METERS : 0)
       : undefined;
-  // Same area rules as the stock routes, per leg: a stop the rider placed
-  // inside an area makes that area unavoidable for the legs touching it,
-  // and only that area. Legs use "budget" directly - there is no single
-  // fastest-route baseline per leg to hold a detour limit against.
-  const search = (from: number, to: number, p: RouteProfile, mode: AreaMode = "budget") => {
+  // A stop the rider placed inside an area makes that area unavoidable for
+  // the legs touching it, and only that area.
+  const search = (from: number, to: number, p: RouteProfile, mode: AreaMode) => {
     const policy = areaPolicy(eng, exemptAreaBits([eng.graph.nodes[from], eng.graph.nodes[to]]), mode);
     return findRoute(eng.graph, scoreOf, from, to, p, {
       inFlaggedArea: policy.blocked,
@@ -1202,10 +1225,24 @@ export function planCustomRoute(
     });
   };
 
+  // Each leg follows the same area rules as the stock routes: stay out of
+  // every area if that is within AREA_DETOUR_LIMIT of the leg's fastest
+  // line, else price High/Elevated. An earlier version went straight to
+  // pricing, so "My route" with no stops was NOT the Safest route it was
+  // based on - and suggested edits were measured against the wrong route.
+  const legUnderAreaRules = (from: number, to: number, p: RouteProfile) => {
+    if (!p.avoidFlaggedAreas) return search(from, to, p, "off");
+    const strict = search(from, to, p, "strict");
+    const fastest = search(from, to, ROUTE_PROFILES.fastest, "off");
+    if (strict && fastest && strict.distanceMeters <= fastest.distanceMeters * (1 + AREA_DETOUR_LIMIT)) return strict;
+    const budget = search(from, to, p, "budget");
+    return budget && (!strict || budget.distanceMeters < strict.distanceMeters) ? budget : strict;
+  };
+
   let bestEffort = false;
   const joined: RoutePath = { path: [], edges: [], distanceMeters: 0, costMeters: 0 };
   for (let i = 0; i < stops.length - 1; i++) {
-    let leg = search(stops[i], stops[i + 1], profile);
+    let leg = legUnderAreaRules(stops[i], stops[i + 1], profile);
     if (!leg && profileId !== "fastest") {
       for (const mode of ["budget", "off"] as const) {
         leg = search(stops[i], stops[i + 1], { ...profile, hardAvoidScore: Infinity }, mode);
@@ -1226,6 +1263,29 @@ export function planCustomRoute(
     joined.distanceMeters += leg.distanceMeters;
     joined.costMeters += leg.costMeters;
   }
+  return { path: joined, bestEffort, stops };
+}
+
+/** Summarises a custom path (planned, or spliced by suggested edits) as "My route". */
+export function summarizeCustom(
+  plan: CustomPlan,
+  waypoints: LatLng[],
+  profileId: RouteProfile["id"],
+  options: PlanOptions = {}
+): RouteSummary {
+  const avoidElevation = options.avoidElevation ?? false;
+  const fewerSignals = options.fewerSignals ?? false;
+  const eng = getRoutingEngine();
+  const profile = ROUTE_PROFILES[profileId];
+  const { path: joined, bestEffort, stops } = plan;
+  // Same penalties as the stock fastest route, so the detour warning and
+  // avoidance claims measure against the identical baseline.
+  const search = (from: number, to: number, p: RouteProfile) =>
+    findRoute(eng.graph, (edgeId: number) => eng.scores[edgeId], from, to, p, {
+      extraPenalty: (edgeId: number) =>
+        (avoidElevation ? eng.elevationPenalty[edgeId] : 0) +
+        (fewerSignals && edgeEntersSignal(eng, edgeId) ? SIGNAL_COST_METERS : 0),
+    });
 
   // Avoidance claims and the detour warning are measured against the plain
   // fastest A->B route, exactly as for the three standard options.
@@ -1330,4 +1390,75 @@ function mainNetwork(graph: BikeGraph): Uint8Array {
   const result = new Uint8Array(n);
   for (let i = 0; i < n; i++) result[i] = comp[i] === largest ? 1 : 0;
   return result;
+}
+
+
+let nodesByPosition: Map<string, number[]> | null = null;
+let outEdgesOf: number[][] | null = null;
+
+/**
+ * Rebuilds the graph route behind a path the browser is showing. Every
+ * route vertex IS a graph node position, so this is an exact lookup, not a
+ * map match. Lets the server work on precisely the route on screen (e.g.
+ * suggested edits) instead of re-planning something that might differ.
+ * Null if the path is not a route on this graph.
+ *
+ * Positions are not unique - OSM has distinct nodes at identical
+ * coordinates (a first version keyed one node per position and failed on
+ * a real route) - so each step keeps every candidate node and the chain
+ * is resolved by which candidates are actually joined by an edge.
+ */
+export function routePathFromLatLngs(path: LatLng[]): RoutePath | null {
+  const eng = getRoutingEngine();
+  if (!nodesByPosition || !outEdgesOf) {
+    nodesByPosition = new Map();
+    eng.graph.nodes.forEach((n, i) => {
+      const k = `${n.lat},${n.lng}`;
+      const list = nodesByPosition!.get(k);
+      if (list) list.push(i);
+      else nodesByPosition!.set(k, [i]);
+    });
+    outEdgesOf = Array.from({ length: eng.graph.nodes.length }, () => []);
+    for (const e of eng.graph.edges) outEdgesOf[e.from].push(e.id);
+  }
+  if (path.length < 2) return null;
+  // Shortest edge from a to b, as A* would have taken.
+  const edgeBetween = (a: number, b: number): GraphEdge | null => {
+    let best: GraphEdge | null = null;
+    for (const id of outEdgesOf![a]) {
+      const e = eng.graph.edges[id];
+      if (e.to === b && (!best || e.lengthMeters < best.lengthMeters)) best = e;
+    }
+    return best;
+  };
+  // Forward pass: for every candidate at step i, the edge that reaches it.
+  const cands = path.map((p) => nodesByPosition!.get(`${p.lat},${p.lng}`) ?? []);
+  if (cands.some((c) => c.length === 0)) return null;
+  const reachedBy: Map<number, GraphEdge | null>[] = [new Map(cands[0].map((n) => [n, null]))];
+  for (let i = 1; i < cands.length; i++) {
+    const here = new Map<number, GraphEdge | null>();
+    for (const b of cands[i]) {
+      for (const a of reachedBy[i - 1].keys()) {
+        const e = edgeBetween(a, b);
+        if (e && !here.has(b)) here.set(b, e);
+      }
+    }
+    if (here.size === 0) return null;
+    reachedBy.push(here);
+  }
+  // Walk back from any reached end node.
+  const edges: GraphEdge[] = [];
+  let node = reachedBy[reachedBy.length - 1].keys().next().value as number;
+  for (let i = reachedBy.length - 1; i > 0; i--) {
+    const e = reachedBy[i].get(node)!;
+    edges.push(e);
+    node = e.from;
+  }
+  edges.reverse();
+  return {
+    path: [eng.graph.nodes[edges[0].from], ...edges.map((e) => eng.graph.nodes[e.to])],
+    edges,
+    distanceMeters: edges.reduce((t, e) => t + e.lengthMeters, 0),
+    costMeters: 0,
+  };
 }

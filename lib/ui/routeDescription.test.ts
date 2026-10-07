@@ -83,6 +83,20 @@ describe("describeRoute on an edited route", () => {
   });
 });
 
+describe("describeRoute with accepted suggestions", () => {
+  it("names each trade-off the rider chose, right after the edited-route line", () => {
+    const r = {
+      ...base,
+      customWaypoints: [{}],
+      acceptedSuggestions: ["Save 13 min via Noe Street - costs +598 ft climbing"],
+    };
+    expect(texts(r).slice(0, 2)).toEqual([
+      "Your edited route · passes 1 stop you chose",
+      "You chose: Save 13 min via Noe Street - costs +598 ft climbing",
+    ]);
+  });
+});
+
 describe("distanceToPath", () => {
   it("measures metres to the nearest segment, not the nearest vertex", () => {
     const path = [
