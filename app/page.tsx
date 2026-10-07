@@ -2,7 +2,6 @@
 
 import { useJsApiLoader } from "@react-google-maps/api";
 import dynamic from "next/dynamic";
-import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import AddressSearch from "@/components/AddressSearch";
 import MapView, { type MapRoute, type MapRouteKind, type RoutePopup } from "@/components/MapView";
@@ -21,6 +20,8 @@ import { describeRoute } from "@/lib/ui/routeDescription";
 import { insertWaypoint } from "@/lib/ui/geometry";
 import { RouteChoiceList } from "@/components/RouteChoices";
 import RouteCompare from "@/components/RouteCompare";
+import SaveRouteButton from "@/components/SaveRouteButton";
+import { shortPlace } from "@/lib/saved/store";
 import type { RouteSummary } from "@/lib/routing/service";
 import type {
   BikeLaneSegment,
@@ -538,12 +539,6 @@ export default function Home() {
         <div>
           <h1 className="text-lg font-bold text-black">🚲 Safe Route</h1>
           <p className="mt-1 text-xs text-black">San Francisco, CA</p>
-          <Link
-            href="/explore"
-            className="mt-2 inline-block rounded-full border border-teal-600 px-3 py-1 text-xs font-semibold text-teal-700 hover:bg-teal-50"
-          >
-            Explore rides by what you like →
-          </Link>
         </div>
 
         <section className="flex flex-col gap-2">
@@ -1117,6 +1112,20 @@ export default function Home() {
             <h2 className="text-xs font-semibold uppercase tracking-wide text-black">
               Route overview
             </h2>
+            {origin && destination && (
+              <SaveRouteButton
+                // A different route starts unsaved.
+                key={`${activeRoute.label}-${activeRoute.distanceMeters}-${activeRoute.path.length}`}
+                defaultName={`${shortPlace(originText)} → ${shortPlace(destinationText)} · ${activeRoute.label.replace(/ · best effort$/, "")}`}
+                build={() => ({
+                  from: { label: originText, point: origin },
+                  to: { label: destinationText, point: destination },
+                  settings: { avoidElevation, fewerSignals },
+                  source: "route",
+                  route: activeRoute,
+                })}
+              />
+            )}
             <ol className="flex flex-col gap-1.5 text-xs text-black" data-testid="turn-list">
               {buildManeuvers(activeRoute.path, activeRoute.streetSpans).map((m, i, all) => {
                 const leg = (all[i + 1]?.atMeters ?? m.atMeters) - m.atMeters;

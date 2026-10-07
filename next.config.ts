@@ -1,6 +1,11 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  // The floating dev-tools badge sits bottom-left - exactly over the
+  // sidebar's bottom buttons (Rename, Start navigation, Save...). A real
+  // click on "Rename" opened the badge's menu instead. Build errors still
+  // show as the full-screen overlay; only the badge goes.
+  devIndicators: false,
   // Next.js blocks cross-origin requests to dev resources by default, and
   // treats 127.0.0.1 as a different origin from localhost. Hitting the dev
   // server by IP - which scripts/renderTour.mjs and most local tooling

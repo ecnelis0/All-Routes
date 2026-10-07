@@ -2,11 +2,12 @@
 
 import { useJsApiLoader } from "@react-google-maps/api";
 import dynamic from "next/dynamic";
-import Link from "next/link";
 import { useRef, useState } from "react";
 import AddressSearch from "@/components/AddressSearch";
 import MapView, { type MapPlace } from "@/components/MapView";
 import { RouteChoiceList } from "@/components/RouteChoices";
+import SaveRouteButton from "@/components/SaveRouteButton";
+import { shortPlace } from "@/lib/saved/store";
 import { emojiFor, INTERESTS, type InterestId, type InterestRide } from "@/lib/interests/catalog";
 import type { RouteSummary } from "@/lib/routing/service";
 import { describeRoute } from "@/lib/ui/routeDescription";
@@ -93,10 +94,7 @@ export default function ExplorePage() {
     <div className="flex min-h-0 flex-1">
       <aside className="flex w-80 shrink-0 flex-col gap-4 overflow-y-auto border-r border-slate-200 bg-white p-4 text-black">
         <div>
-          <Link href="/" className="text-xs font-medium text-blue-700 hover:underline">
-            ← Safety routing
-          </Link>
-          <h1 className="mt-1 text-lg font-semibold">Explore rides</h1>
+          <h1 className="text-lg font-semibold">Explore rides</h1>
           <p className="text-xs text-black/60">A route made around what you like. The safety rules still apply.</p>
         </div>
 
@@ -229,6 +227,20 @@ export default function ExplorePage() {
               </p>
             </div>
 
+            {origin && destination && (
+              <SaveRouteButton
+                key={`${ride.style}-${ride.route.distanceMeters}`}
+                defaultName={`${shortPlace(originText)} → ${shortPlace(destinationText)} · ${ride.route.label}`}
+                build={() => ({
+                  from: { label: originText, point: origin },
+                  to: { label: destinationText, point: destination },
+                  settings: { avoidElevation: false, fewerSignals: false },
+                  source: "explore",
+                  route: ride.route,
+                  places: ride.stops,
+                })}
+              />
+            )}
             <div className="flex gap-2">
               <button
                 type="button"

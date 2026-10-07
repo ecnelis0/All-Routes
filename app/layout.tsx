@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
+import AppNav from "@/components/AppNav";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -34,7 +35,10 @@ export default function RootLayout({
         With min-h-full the body is free to grow past the viewport, and a
         long sidebar pushed the 3D tour's transport bar below the fold.
       */}
-      <body className="h-full overflow-hidden flex flex-col">{children}</body>
+      <body className="h-full overflow-hidden flex flex-col">
+        <AppNav />
+        {children}
+      </body>
     </html>
   );
 }
