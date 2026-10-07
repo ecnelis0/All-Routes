@@ -4,7 +4,7 @@ import { useJsApiLoader } from "@react-google-maps/api";
 import dynamic from "next/dynamic";
 import { useEffect, useRef, useState } from "react";
 import AddressSearch from "@/components/AddressSearch";
-import MapView, { type MapRoute, type RoutePopup } from "@/components/MapView";
+import MapView, { type MapRoute, type MapRouteKind, type RoutePopup } from "@/components/MapView";
 // Loaded lazily: maplibre-gl is ~900KB and only needed when a tour opens.
 const Route3DTour = dynamic(() => import("@/components/Route3DTour"), { ssr: false });
 const NavigationView = dynamic(() => import("@/components/NavigationView"), { ssr: false });
@@ -16,6 +16,8 @@ import {
 import { DEMO_CITY } from "@/lib/mockData";
 import { buildManeuvers, formatDistance } from "@/lib/nav/instructions";
 import { describeRoute } from "@/lib/ui/routeDescription";
+import { insertWaypoint } from "@/lib/ui/geometry";
+import { RouteChoiceList } from "@/components/RouteChoices";
 import type { RouteSummary } from "@/lib/routing/service";
 import type {
   BikeLaneSegment,
@@ -25,6 +27,9 @@ import type {
 } from "@/lib/types";
 
 type RouteProfileId = RouteSummary["profile"];
+/** A standard option, or the rider's own edited route. */
+type RouteKey = MapRouteKind;
+const MAX_STOPS = 8;
 
 // No "places" library: address search goes through /api/geocode (see
 // components/AddressSearch.tsx) because this Cloud project has only the
@@ -106,7 +111,7 @@ export default function Home() {
   const [origin, setOrigin] = useState<LatLng | null>(null);
   const [destination, setDestination] = useState<LatLng | null>(null);
   const [routes, setRoutes] = useState<Record<string, RouteSummary>>({});
-  const [selectedRouteKind, setSelectedRouteKind] = useState<RouteProfileId>("fastest");
+  const [selectedRouteKind, setSelectedRouteKind] = useState<RouteKey>("fastest");
   const [originText, setOriginText] = useState("");
   const [destinationText, setDestinationText] = useState("");
   const [modelMeta, setModelMeta] = useState<{ modelSource: string; modelVersion: string } | null>(null);
@@ -116,8 +121,26 @@ export default function Home() {
   const [tourOpen, setTourOpen] = useState(false);
   const [navSource, setNavSource] = useState<"gps" | "simulate" | null>(null);
   /** Routes the rider took off the map. Reset by every new search. */
-  const [hiddenRoutes, setHiddenRoutes] = useState<RouteProfileId[]>([]);
+  const [hiddenRoutes, setHiddenRoutes] = useState<RouteKey[]>([]);
   const [routePopup, setRoutePopup] = useState<RoutePopup | null>(null);
+  /**
+   * A route has been SELECTED: only it is on the map, and it can be
+   * toured, navigated or edited. "Show all routes" goes back.
+   */
+  const [focused, setFocused] = useState(false);
+  /** The rider's saved, edited route ("My route"). */
+  const [customRoute, setCustomRoute] = useState<RouteSummary | null>(null);
+  // Edit mode. The route being edited is planned with `editProfile`'s
+  // rules through `editStops`; `draftRoute` is the latest result and
+  // `editOriginal` the route as it was, for comparison.
+  const [editing, setEditing] = useState(false);
+  const [editProfile, setEditProfile] = useState<RouteProfileId>("fastest");
+  const [editOriginal, setEditOriginal] = useState<RouteSummary | null>(null);
+  const [editStops, setEditStops] = useState<LatLng[]>([]);
+  const [draftRoute, setDraftRoute] = useState<RouteSummary | null>(null);
+  const [draftBusy, setDraftBusy] = useState(false);
+  const [draftError, setDraftError] = useState<string | null>(null);
+  const draftRequestIdRef = useRef(0);
   const [computingSafer, setComputingSafer] = useState(false);
   const [routingError, setRoutingError] = useState<string | null>(null);
 
@@ -164,6 +187,9 @@ export default function Home() {
     setConfirmed(false);
     setHiddenRoutes([]);
     setRoutePopup(null);
+    setFocused(false);
+    setCustomRoute(null);
+    exitEditing();
     setComputingSafer(false);
     setRoutingError(null);
   }
@@ -186,6 +212,9 @@ export default function Home() {
     setRoutes({});
     setHiddenRoutes([]);
     setRoutePopup(null);
+    setFocused(false);
+    setCustomRoute(null);
+    exitEditing();
     setSelectedRouteKind("fastest");
     setConfirmed(false);
     setRoutingError(null);
@@ -268,17 +297,123 @@ export default function Home() {
     }
   }
 
-  function selectRouteTab(kind: RouteProfileId) {
-    if (!routes[kind]) return;
+  function routeFor(kind: RouteKey): RouteSummary | null {
+    return kind === "custom" ? customRoute : (routes[kind] ?? null);
+  }
+
+  function selectRouteTab(kind: RouteKey) {
+    if (!routeFor(kind)) return;
+    if (editing) exitEditing();
     setSelectedRouteKind(kind);
     setConfirmed(false);
     // Choosing a route you removed puts it back - you asked to see it.
     setHiddenRoutes((h) => h.filter((k) => k !== kind));
   }
 
-  function removeRouteFromMap(kind: RouteProfileId) {
+  /** Select a route: only it stays on the map, ready to tour, navigate or edit. */
+  function selectRoute(kind: RouteKey) {
+    selectRouteTab(kind);
+    setFocused(true);
+    setRoutePopup(null);
+  }
+
+  function exitSelection() {
+    exitEditing();
+    setFocused(false);
+    setRoutePopup(null);
+  }
+
+  function removeRouteFromMap(kind: RouteKey) {
     setHiddenRoutes((h) => (h.includes(kind) ? h : [...h, kind]));
     setRoutePopup(null);
+  }
+
+  // --- route editing ------------------------------------------------------
+  function exitEditing() {
+    draftRequestIdRef.current++; // drop any in-flight re-plan
+    setEditing(false);
+    setEditStops([]);
+    setDraftRoute(null);
+    setEditOriginal(null);
+    setDraftError(null);
+    setDraftBusy(false);
+  }
+
+  function startEditing() {
+    const base = routeFor(selectedRouteKind);
+    if (!base) return;
+    setEditProfile(base.profile);
+    setEditOriginal(base);
+    // Editing "My route" again continues from its stops.
+    setEditStops(base.customWaypoints ?? []);
+    setDraftRoute(base.customWaypoints ? base : null);
+    setDraftError(null);
+    setEditing(true);
+    setFocused(true);
+    setTourOpen(false);
+    setConfirmed(false);
+    setNavSource(null);
+    setRoutePopup(null);
+  }
+
+  async function replanDraft(stops: LatLng[]) {
+    if (!origin || !destination) return;
+    const id = ++draftRequestIdRef.current;
+    setDraftBusy(true);
+    setDraftError(null);
+    try {
+      const res = await fetch("/api/route/custom", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          origin,
+          destination,
+          waypoints: stops,
+          profile: editProfile,
+          avoidElevation,
+          fewerSignals,
+        }),
+      });
+      const json = (await res.json()) as { route?: RouteSummary; error?: string };
+      if (id !== draftRequestIdRef.current) return; // a newer edit won
+      if (!res.ok || !json.route) setDraftError(json.error ?? `Could not plan that route (${res.status}).`);
+      else setDraftRoute(json.route);
+    } catch (err) {
+      if (id === draftRequestIdRef.current) setDraftError(err instanceof Error ? err.message : "Could not plan that route.");
+    } finally {
+      if (id === draftRequestIdRef.current) setDraftBusy(false);
+    }
+  }
+
+  function updateStops(next: LatLng[]) {
+    setEditStops(next);
+    void replanDraft(next);
+  }
+
+  function addStop(at: LatLng) {
+    if (editStops.length >= MAX_STOPS) {
+      setDraftError(`A route can have at most ${MAX_STOPS} stops - remove one first.`);
+      return;
+    }
+    const current = (draftRoute ?? editOriginal)?.path ?? [];
+    updateStops(insertWaypoint(editStops, at, current));
+  }
+
+  function moveStop(index: number, to: LatLng) {
+    updateStops(editStops.map((w, i) => (i === index ? to : w)));
+  }
+
+  function removeStop(index: number) {
+    updateStops(editStops.filter((_, i) => i !== index));
+  }
+
+  function saveEdit() {
+    if (!draftRoute) return;
+    setCustomRoute(draftRoute);
+    setSelectedRouteKind("custom");
+    setHiddenRoutes((h) => h.filter((k) => k !== "custom"));
+    exitEditing();
+    setFocused(true);
   }
 
   if (!apiKey) {
@@ -301,18 +436,28 @@ export default function Home() {
     );
   }
 
-  const activeRoute = routes[selectedRouteKind] ?? null;
-  const mapRoutes: MapRoute[] = ROUTE_TABS.flatMap((tab) => {
-    const route = routes[tab.kind];
-    if (!route || hiddenRoutes.includes(tab.kind)) return [];
-    return [
-      {
-        kind: tab.kind,
-        path: route.path,
-        description: describeRoute(route, estimateMinutes(route.distanceMeters)),
-      },
-    ];
-  });
+  const describe = (route: RouteSummary) => describeRoute(route, estimateMinutes(route.distanceMeters));
+  const selectedRoute = routeFor(selectedRouteKind);
+  // While editing, the route on screen (and in the sidebar) is the edited
+  // draft - or the original until the first stop is added.
+  const activeRoute = editing ? (draftRoute ?? editOriginal) : selectedRoute;
+  const tabs: { kind: RouteKey; label: string; hint: string }[] = [
+    ...ROUTE_TABS,
+    ...(customRoute ? [{ kind: "custom" as const, label: "My route", hint: "Your edited route" }] : []),
+  ];
+  const mapRoutes: MapRoute[] = editing
+    ? activeRoute
+      ? [{ kind: "custom", path: activeRoute.path, description: describe(activeRoute) }]
+      : []
+    : focused
+      ? selectedRoute
+        ? [{ kind: selectedRouteKind, path: selectedRoute.path, description: describe(selectedRoute) }]
+        : []
+      : tabs.flatMap((tab) => {
+          const route = routeFor(tab.kind);
+          if (!route || hiddenRoutes.includes(tab.kind)) return [];
+          return [{ kind: tab.kind, path: route.path, description: describe(route) }];
+        });
   const hasBothEnds = Boolean(origin && destination);
 
   return (
@@ -439,8 +584,8 @@ export default function Home() {
               Choose a route
             </h2>
             <div className="grid grid-cols-1 gap-1.5">
-              {ROUTE_TABS.map((tab) => {
-                const route = routes[tab.kind];
+              {tabs.map((tab) => {
+                const route = routeFor(tab.kind);
                 const isSelected = selectedRouteKind === tab.kind;
                 const isReady = Boolean(route);
                 return (
@@ -481,10 +626,139 @@ export default function Home() {
                 Show {hiddenRoutes.length === 1 ? "removed route" : `all ${hiddenRoutes.length} removed routes`} on map
               </button>
             )}
-            <p className="text-[10px] text-black/50">Tip: click any route on the map to see what kind it is.</p>
+            {!focused && (
+              <p className="text-[10px] text-black/50">
+                Tip: click any route on the map to see what kind it is, then select it to tour,
+                navigate or edit it.
+              </p>
+            )}
+
+            {focused && !editing && selectedRoute && (
+              <div className="flex flex-col gap-2 rounded-lg border-2 border-blue-600 bg-blue-50 p-2.5 text-xs text-black" data-testid="selected-route">
+                <div>
+                  <p className="text-[10px] font-semibold uppercase tracking-wide text-blue-800">Selected route</p>
+                  <p className="text-sm font-semibold">{selectedRoute.label}</p>
+                  <p className="text-[11px] text-black/60">Only this route is on the map.</p>
+                </div>
+                <div className="flex gap-1.5">
+                  <button
+                    type="button"
+                    onClick={startEditing}
+                    className="flex-1 rounded-md bg-violet-700 px-2 py-1.5 text-xs font-semibold text-white hover:bg-violet-800"
+                  >
+                    Edit route
+                  </button>
+                  <button
+                    type="button"
+                    onClick={exitSelection}
+                    className="flex-1 rounded-md border border-slate-300 bg-white px-2 py-1.5 text-xs font-medium hover:bg-slate-50"
+                  >
+                    Show all routes
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {editing && editOriginal && (
+              <div className="flex flex-col gap-2 rounded-lg border-2 border-violet-600 bg-violet-50 p-2.5 text-xs text-black" data-testid="edit-panel">
+                <div>
+                  <p className="text-[10px] font-semibold uppercase tracking-wide text-violet-800">Editing route</p>
+                  <p className="text-sm font-semibold">Based on {editOriginal.label}</p>
+                  <p className="mt-0.5 leading-snug text-black/70">
+                    Click the map (or the route) to add a stop it must pass through. Drag a stop to
+                    move it; click a stop to remove it. Between stops it still follows{" "}
+                    {editOriginal.label.replace(/ · best effort$/, "")}&apos;s rules.
+                  </p>
+                </div>
+
+                {editStops.length > 0 && (
+                  <ol className="flex flex-col gap-1">
+                    {editStops.map((w, i) => (
+                      <li key={`${i}-${w.lat}-${w.lng}`} className="flex items-center justify-between gap-2">
+                        <span>
+                          <span className="mr-1.5 inline-flex h-4 w-4 items-center justify-center rounded-full bg-violet-700 text-[10px] font-bold text-white">
+                            {i + 1}
+                          </span>
+                          Stop {i + 1}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => removeStop(i)}
+                          aria-label={`Remove stop ${i + 1}`}
+                          className="text-[11px] font-medium text-violet-800 hover:underline"
+                        >
+                          Remove
+                        </button>
+                      </li>
+                    ))}
+                  </ol>
+                )}
+
+                {draftBusy && <p className="text-black/60">Re-planning…</p>}
+                {draftError && <p className="rounded bg-red-50 px-2 py-1 text-red-700">{draftError}</p>}
+
+                {draftRoute && (
+                  <table className="w-full text-[11px]" data-testid="edit-compare">
+                    <thead>
+                      <tr className="text-black/60">
+                        <th className="text-left font-medium" />
+                        <th className="text-right font-medium">Original</th>
+                        <th className="text-right font-medium">Yours</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {[
+                        ["Distance", `${metersToMiles(editOriginal.distanceMeters)} mi`, `${metersToMiles(draftRoute.distanceMeters)} mi`],
+                        ["Danger (avg)", String(editOriginal.meanDanger), String(draftRoute.meanDanger)],
+                        ["Protected lanes", `${Math.round(editOriginal.protectedLaneFraction * 100)}%`, `${Math.round(draftRoute.protectedLaneFraction * 100)}%`],
+                        ["Traffic lights", String(editOriginal.trafficSignals), String(draftRoute.trafficSignals)],
+                        ["Climbing", `${Math.round(editOriginal.elevationGainMeters * 3.281)} ft`, `${Math.round(draftRoute.elevationGainMeters * 3.281)} ft`],
+                        ["In flagged areas", `${metersToMiles(editOriginal.metersInFlaggedAreas)} mi`, `${metersToMiles(draftRoute.metersInFlaggedAreas)} mi`],
+                      ].map(([k, a, b]) => (
+                        <tr key={k}>
+                          <td>{k}</td>
+                          <td className="text-right">{a}</td>
+                          <td className="text-right font-semibold">{b}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+
+                <div className="flex gap-1.5">
+                  <button
+                    type="button"
+                    onClick={saveEdit}
+                    disabled={!draftRoute || draftBusy}
+                    className="flex-1 rounded-md bg-violet-700 px-2 py-1.5 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Save as my route
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => updateStops([])}
+                    disabled={editStops.length === 0}
+                    className="rounded-md border border-slate-300 bg-white px-2 py-1.5 text-xs font-medium disabled:opacity-50"
+                  >
+                    Clear stops
+                  </button>
+                  <button
+                    type="button"
+                    onClick={exitEditing}
+                    className="rounded-md border border-slate-300 bg-white px-2 py-1.5 text-xs font-medium"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
 
             {activeRoute && (
               <div className="flex flex-col gap-1 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-black">
+                <div className="mb-1 border-b border-slate-200 pb-1.5" data-testid="route-details-choices">
+                  <span className="font-semibold">{activeRoute.label}</span>
+                  <RouteChoiceList description={describe(activeRoute)} />
+                </div>
                 <div className="flex justify-between">
                   <span>Distance</span>
                   <span className="font-medium">{metersToMiles(activeRoute.distanceMeters)} mi</span>
@@ -628,13 +902,23 @@ export default function Home() {
               </div>
             )}
 
+            {!focused && activeRoute && (
+              <button
+                type="button"
+                onClick={() => selectRoute(selectedRouteKind)}
+                className="rounded-md bg-slate-900 px-3 py-2 text-sm font-semibold text-white hover:bg-slate-800"
+              >
+                Select this route
+              </button>
+            )}
             <button
               type="button"
               // Toggles: the sidebar stays visible beside the tour, so the
               // same button that opened it is the natural way to close it.
               onClick={() => setTourOpen((open) => !open)}
               aria-pressed={tourOpen}
-              disabled={!activeRoute || activeRoute.path.length < 2}
+              disabled={editing || !activeRoute || activeRoute.path.length < 2}
+              title={editing ? "Save or cancel your edit first" : undefined}
               className={`rounded-md border px-3 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50 ${
                 tourOpen
                   ? "border-slate-900 bg-slate-900 text-white hover:bg-slate-800"
@@ -646,7 +930,8 @@ export default function Home() {
             <button
               type="button"
               onClick={() => setConfirmed(true)}
-              disabled={!activeRoute}
+              disabled={editing || !activeRoute}
+              title={editing ? "Save or cancel your edit first" : undefined}
               className="rounded-md bg-blue-600 px-3 py-1.5 text-sm font-medium text-white disabled:cursor-not-allowed disabled:bg-slate-300"
             >
               Confirm route
@@ -703,15 +988,20 @@ export default function Home() {
           origin={origin}
           destination={destination}
           routes={mapRoutes}
-          selectedKind={activeRoute ? selectedRouteKind : null}
+          selectedKind={activeRoute ? (editing ? "custom" : selectedRouteKind) : null}
+          focused={focused || editing}
           popup={routePopup}
           onRouteClick={setRoutePopup}
           onPopupClose={() => setRoutePopup(null)}
-          onSelectRoute={(kind) => {
-            selectRouteTab(kind);
-            setRoutePopup(null);
-          }}
+          onSelectRoute={selectRoute}
+          onExitSelection={exitSelection}
           onRemoveRoute={removeRouteFromMap}
+          editing={editing}
+          waypoints={editStops}
+          ghostPath={editing && draftRoute ? (editOriginal?.path ?? null) : null}
+          onAddStop={addStop}
+          onMoveStop={moveStop}
+          onRemoveStop={removeStop}
           dangerZones={showNeighborhoodView ? (data?.dangerZones ?? []) : []}
           dangerousNeighborhoods={showNeighborhoodView ? SF_DANGEROUS_NEIGHBORHOODS : []}
         />
@@ -724,6 +1014,7 @@ export default function Home() {
             pathElevations={activeRoute.pathElevations}
             protectedSpans={activeRoute.protectedSpans}
             avoidedNearby={activeRoute.avoidedNearby}
+            details={describe(activeRoute)}
             onClose={() => setTourOpen(false)}
           />
         )}
@@ -734,6 +1025,8 @@ export default function Home() {
             source={navSource}
             avoidElevation={avoidElevation}
             fewerSignals={fewerSignals}
+            details={describe(activeRoute)}
+            waypoints={activeRoute.customWaypoints}
             onExit={() => setNavSource(null)}
           />
         )}

@@ -1,6 +1,10 @@
 "use client";
 
-import { Circle, GoogleMap, InfoWindow, Marker, OverlayView, Polyline } from "@react-google-maps/api";
+// The "F" (function component) versions, not the class ones: under React
+// 18+ the class Polyline/Marker do not reliably remove themselves from the
+// map on unmount, so a route taken off screen stayed painted - selecting
+// one route left the other two drawn underneath it.
+import { CircleF, GoogleMap, InfoWindowF, MarkerF, OverlayViewF, PolylineF } from "@react-google-maps/api";
 import {
   neighborhoodRiskColor,
   type DangerousNeighborhood,
@@ -24,12 +28,17 @@ export interface SelectedRouteDisplay {
   path: LatLng[];
 }
 
-export interface MapRoute extends SelectedRouteDisplay {
+/** The three standard options plus the rider's own edited route. */
+export type MapRouteKind = SelectedRouteDisplay["kind"] | "custom";
+
+export interface MapRoute {
+  kind: MapRouteKind;
+  path: LatLng[];
   description: RouteDescription;
 }
 
 export interface RoutePopup {
-  kind: SelectedRouteDisplay["kind"];
+  kind: MapRouteKind;
   /** Where the route was clicked - the popup opens there. */
   position: LatLng;
   /**
@@ -37,7 +46,7 @@ export interface RoutePopup {
    * two options share a stretch only the top line can take the click, so
    * the popup offers the others rather than leaving them unreachable.
    */
-  alsoHere: SelectedRouteDisplay["kind"][];
+  alsoHere: MapRouteKind[];
 }
 
 /** How close another route must run to the click to count as "also here". */
@@ -54,12 +63,26 @@ interface MapViewProps {
    * kind of route it is, or removed from the map.
    */
   routes?: MapRoute[];
-  selectedKind?: SelectedRouteDisplay["kind"] | null;
+  selectedKind?: MapRouteKind | null;
+  /** True once a route is selected: only it is on the map. */
+  focused?: boolean;
   popup?: RoutePopup | null;
   onRouteClick?: (popup: RoutePopup) => void;
   onPopupClose?: () => void;
-  onSelectRoute?: (kind: SelectedRouteDisplay["kind"]) => void;
-  onRemoveRoute?: (kind: SelectedRouteDisplay["kind"]) => void;
+  onSelectRoute?: (kind: MapRouteKind) => void;
+  onExitSelection?: () => void;
+  onRemoveRoute?: (kind: MapRouteKind) => void;
+  /**
+   * Edit mode: clicks on the map (or the route) add a stop, stops can be
+   * dragged, and clicking a stop removes it. `ghostPath` is the route
+   * being edited as it was, drawn faintly for comparison.
+   */
+  editing?: boolean;
+  waypoints?: LatLng[];
+  ghostPath?: LatLng[] | null;
+  onAddStop?: (at: LatLng) => void;
+  onMoveStop?: (index: number, to: LatLng) => void;
+  onRemoveStop?: (index: number) => void;
   /**
    * "Neighborhood view" - translucent circles over the same danger zones
    * used for route-risk scoring (see `computeCompositeDangerZones`). Not
@@ -128,11 +151,17 @@ const ROAD_WIDTH_BY_KIND: Record<RoadKind, number> = {
 // Fastest stays a neutral gray - it's the baseline we compare against, not
 // a recommendation. Safer is amber (a reasonable middle ground), safest is
 // green (safety above all else).
-const ROUTE_COLOR_BY_KIND: Record<SelectedRouteDisplay["kind"], string> = {
+const ROUTE_COLOR_BY_KIND: Record<MapRouteKind, string> = {
   fastest: "#64748b",
   balanced: "#f59e0b",
   safest: "#16a34a",
+  // The rider's own route - distinct from every stock option.
+  custom: "#7c3aed",
 };
+
+function toLatLng(e: google.maps.MapMouseEvent): LatLng | null {
+  return e.latLng ? { lat: e.latLng.lat(), lng: e.latLng.lng() } : null;
+}
 
 function scoreForLayer(factorScores: DangerFactorScores, overall: number, layer: MapLayerId): number {
   switch (layer) {
@@ -155,11 +184,19 @@ export default function MapView({
   destination,
   routes = [],
   selectedKind = null,
+  focused = false,
   popup = null,
   onRouteClick,
   onPopupClose,
   onSelectRoute,
+  onExitSelection,
   onRemoveRoute,
+  editing = false,
+  waypoints = [],
+  ghostPath = null,
+  onAddStop,
+  onMoveStop,
+  onRemoveStop,
   dangerZones = [],
   dangerousNeighborhoods = [],
   roadSegments = [],
@@ -185,9 +222,18 @@ export default function MapView({
   }
 
   return (
-    <GoogleMap mapContainerStyle={containerStyle} center={center} zoom={13} options={mapOptions}>
+    <GoogleMap
+      mapContainerStyle={containerStyle}
+      center={center}
+      zoom={13}
+      options={editing ? { ...mapOptions, draggableCursor: "crosshair" } : mapOptions}
+      onClick={(e) => {
+        const at = toLatLng(e);
+        if (editing && at) onAddStop?.(at);
+      }}
+    >
       {dangerousNeighborhoods.map((area) => (
-        <Circle
+        <CircleF
           key={area.id}
           center={area.center}
           radius={area.radiusMeters}
@@ -206,10 +252,10 @@ export default function MapView({
       ))}
 
       {dangerousNeighborhoods.map((area) => (
-        <OverlayView
+        <OverlayViewF
           key={`${area.id}-label`}
           position={area.center}
-          mapPaneName={OverlayView.OVERLAY_MOUSE_TARGET}
+          mapPaneName="overlayMouseTarget"
           getPixelPositionOffset={(w, h) => ({ x: -(w / 2), y: -(h / 2) })}
         >
           <span
@@ -224,11 +270,11 @@ export default function MapView({
           >
             {area.name}
           </span>
-        </OverlayView>
+        </OverlayViewF>
       ))}
 
       {dangerZones.map((zone) => (
-        <Circle
+        <CircleF
           key={zone.id}
           center={zone.center}
           radius={zone.radiusMeters}
@@ -248,7 +294,7 @@ export default function MapView({
         const isSelected = segment.id === selectedSegmentId;
         const baseWidth = ROAD_WIDTH_BY_KIND[segment.kind];
         return (
-          <Polyline
+          <PolylineF
             key={segment.id}
             path={segment.path}
             onClick={() => onSegmentClick?.(segment)}
@@ -268,8 +314,13 @@ export default function MapView({
         .map((route) => {
           const isSelected = route.kind === selectedKind;
           const click = (e: google.maps.MapMouseEvent) => {
-            const at = e.latLng;
-            const position = at ? { lat: at.lat(), lng: at.lng() } : route.path[Math.floor(route.path.length / 2)];
+            const position = toLatLng(e) ?? route.path[Math.floor(route.path.length / 2)];
+            // While editing, the route line is the most natural place to
+            // click - so it adds a stop there instead of opening the popup.
+            if (editing) {
+              onAddStop?.(position);
+              return;
+            }
             onRouteClick?.({
               kind: route.kind,
               position,
@@ -279,7 +330,7 @@ export default function MapView({
             });
           };
           return [
-            <Polyline
+            <PolylineF
               key={`${route.kind}-line`}
               path={route.path}
               options={{
@@ -292,7 +343,7 @@ export default function MapView({
             />,
             // A 5px line is a hard target, especially on a phone. A wide,
             // nearly invisible twin catches the click instead.
-            <Polyline
+            <PolylineF
               key={`${route.kind}-hit`}
               path={route.path}
               onClick={click}
@@ -313,7 +364,7 @@ export default function MapView({
           if (!route) return null;
           const d = route.description;
           return (
-            <InfoWindow position={popup.position} onCloseClick={onPopupClose}>
+            <InfoWindowF position={popup.position} onCloseClick={onPopupClose}>
               <div className="flex max-w-60 flex-col gap-1.5 text-xs text-slate-900" data-testid="route-popup">
                 <p className="flex items-center gap-1.5 text-sm font-semibold">
                   <span
@@ -356,30 +407,85 @@ export default function MapView({
                   </p>
                 )}
                 <div className="mt-1 flex gap-1.5">
-                  {route.kind !== selectedKind && (
+                  {focused ? (
                     <button
                       type="button"
-                      onClick={() => onSelectRoute?.(route.kind)}
-                      className="rounded bg-slate-900 px-2 py-1 font-semibold text-white"
+                      onClick={() => onExitSelection?.()}
+                      className="rounded border border-slate-300 px-2 py-1 font-medium"
                     >
-                      Show details
+                      Show all routes
                     </button>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => onSelectRoute?.(route.kind)}
+                        className="rounded bg-slate-900 px-2 py-1 font-semibold text-white"
+                      >
+                        Select this route
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onRemoveRoute?.(route.kind)}
+                        className="rounded border border-slate-300 px-2 py-1 font-medium"
+                      >
+                        Remove from map
+                      </button>
+                    </>
                   )}
-                  <button
-                    type="button"
-                    onClick={() => onRemoveRoute?.(route.kind)}
-                    className="rounded border border-slate-300 px-2 py-1 font-medium"
-                  >
-                    Remove from map
-                  </button>
                 </div>
               </div>
-            </InfoWindow>
+            </InfoWindowF>
           );
         })()}
 
-      {origin && <Marker position={origin} label={{ text: "A", color: "white" }} />}
-      {destination && <Marker position={destination} label={{ text: "B", color: "white" }} />}
+      {editing && ghostPath && ghostPath.length > 1 && (
+        <PolylineF
+          path={ghostPath}
+          options={{
+            strokeColor: "#334155",
+            strokeOpacity: 0,
+            clickable: false,
+            zIndex: 29,
+            // Dashed: Google Maps has no dash style, so it is drawn as a
+            // repeating symbol - "the route as it was", for comparison.
+            icons: [
+              {
+                icon: { path: "M 0,-1 0,1", strokeOpacity: 0.55, strokeWeight: 3, scale: 3 },
+                offset: "0",
+                repeat: "14px",
+              },
+            ],
+          }}
+        />
+      )}
+
+      {editing &&
+        waypoints.map((w, i) => (
+          <MarkerF
+            key={`stop-${i}-${w.lat}-${w.lng}`}
+            position={w}
+            draggable
+            title={`Stop ${i + 1} - drag to move, click to remove`}
+            label={{ text: String(i + 1), color: "white", fontWeight: "700" }}
+            icon={{
+              path: 0, // google.maps.SymbolPath.CIRCLE
+              scale: 11,
+              fillColor: ROUTE_COLOR_BY_KIND.custom,
+              fillOpacity: 1,
+              strokeColor: "#ffffff",
+              strokeWeight: 2,
+            }}
+            onClick={() => onRemoveStop?.(i)}
+            onDragEnd={(e) => {
+              const at = toLatLng(e);
+              if (at) onMoveStop?.(i, at);
+            }}
+          />
+        ))}
+
+      {origin && <MarkerF position={origin} label={{ text: "A", color: "white" }} />}
+      {destination && <MarkerF position={destination} label={{ text: "B", color: "white" }} />}
     </GoogleMap>
   );
 }

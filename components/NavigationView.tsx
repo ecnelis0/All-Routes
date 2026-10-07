@@ -28,6 +28,9 @@ import {
   simulatedFix,
 } from "@/lib/nav/simulate";
 import type { LatLng } from "@/lib/types";
+import type { RouteDescription } from "@/lib/ui/routeDescription";
+import { RouteDetailsToggle } from "@/components/RouteChoices";
+import { alongPath } from "@/lib/ui/geometry";
 
 /**
  * Turn-by-turn navigation for a confirmed route.
@@ -61,6 +64,14 @@ interface Props {
   avoidElevation: boolean;
   fewerSignals: boolean;
   onExit: () => void;
+  /** What this route is and which choices it honoured, shown on demand. */
+  details?: RouteDescription;
+  /**
+   * Stops of a rider-edited route. A reroute must still pass the ones not
+   * yet reached, rather than replacing the rider's own route with a stock
+   * one because they missed a turn.
+   */
+  waypoints?: LatLng[];
 }
 
 /** Heading-up follow camera. Closer and flatter than the tour: this is for reading the next corner. */
@@ -127,6 +138,8 @@ export default function NavigationView({
   avoidElevation,
   fewerSignals,
   onExit,
+  details,
+  waypoints,
 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MlMap | null>(null);
@@ -188,6 +201,8 @@ export default function NavigationView({
     });
   }, [route, cum, maneuvers]);
 
+  const stopsRef = useRef<LatLng[] | undefined>(waypoints);
+
   const reroute = useCallback(
     async (from: GpsFix) => {
       const now = Date.now();
@@ -200,7 +215,13 @@ export default function NavigationView({
       lastRerouteRef.current = now;
       setRerouting(true);
       try {
-        const res = await fetch("/api/route", {
+        // Stops already passed are dropped; the rest stay in order.
+        const { path: currentPath } = routeRef.current;
+        const remaining = (stopsRef.current ?? []).filter(
+          (w) => alongPath(w, currentPath) > trackerRef.current.furthestMeters + 15,
+        );
+        const isCustom = stopsRef.current !== undefined;
+        const res = await fetch(isCustom ? "/api/route/custom" : "/api/route", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -208,12 +229,16 @@ export default function NavigationView({
             destination,
             avoidElevation,
             fewerSignals,
+            ...(isCustom ? { waypoints: remaining, profile: initialRoute.profile } : {}),
           }),
         });
-        const json = (await res.json()) as {
+        const raw = (await res.json()) as {
           routes?: (NavRoute & { profile: string })[];
+          route?: NavRoute & { profile: string };
           error?: string;
         };
+        const json = { ...raw, routes: raw.route ? [raw.route] : raw.routes };
+        if (isCustom && res.ok) stopsRef.current = remaining;
         if (!res.ok || !json.routes?.length) {
           setStatus(
             json.error ??
@@ -522,6 +547,7 @@ export default function NavigationView({
             {status}
           </p>
         )}
+        {details && <RouteDetailsToggle description={details} />}
       </div>
 
       {!following && !arrived && (

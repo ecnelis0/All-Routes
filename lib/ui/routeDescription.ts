@@ -18,6 +18,8 @@ export interface DescribableRoute {
   preferredFewerSignals: boolean;
   trafficSignals: number;
   elevationGainMeters: number;
+  /** Present only on a route the rider edited. */
+  customWaypoints?: unknown[];
 }
 
 export interface RouteDescription {
@@ -33,6 +35,14 @@ const MI = 1609.34;
 export function describeRoute(route: DescribableRoute, minutes: string): RouteDescription {
   const bestEffort = route.label.endsWith("best effort");
   const choices: RouteDescription["choices"] = [];
+
+  if (route.customWaypoints) {
+    const n = route.customWaypoints.length;
+    choices.push({
+      text: n > 0 ? `Your edited route · passes ${n} stop${n === 1 ? "" : "s"} you chose` : "Your edited route",
+      honoured: true,
+    });
+  }
 
   if (route.profile === "fastest") {
     choices.push({ text: "Did not avoid dangerous areas", honoured: false });

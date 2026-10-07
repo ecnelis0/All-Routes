@@ -41,6 +41,13 @@ describe("describeRoute", () => {
   });
 });
 
+describe("describeRoute on an edited route", () => {
+  it("says it is the rider's own route and how many stops it passes", () => {
+    const r = { ...base, label: "My route (Safest + bike lanes)", customWaypoints: [{}, {}] };
+    expect(texts(r)[0]).toBe("Your edited route · passes 2 stops you chose");
+  });
+});
+
 describe("distanceToPath", () => {
   it("measures metres to the nearest segment, not the nearest vertex", () => {
     const path = [

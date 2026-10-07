@@ -36,6 +36,8 @@ import {
 import type { StreetSpan } from "@/lib/tour/currentStreet";
 import type { LatLng } from "@/lib/types";
 import { ROUTE_PROFILES } from "@/lib/routing/cost";
+import type { RouteDescription } from "@/lib/ui/routeDescription";
+import { RouteDetailsToggle } from "@/components/RouteChoices";
 
 /**
  * Cinematic 3D fly-through of a route, over real aerial imagery and real
@@ -69,6 +71,8 @@ interface Props {
   protectedSpans?: ProtectedSpan[];
   avoidedNearby?: AvoidedArea[];
   onClose: () => void;
+  /** What this route is and which choices it honoured, shown on demand. */
+  details?: RouteDescription;
 }
 
 /**
@@ -95,6 +99,7 @@ export default function Route3DTour({
   protectedSpans = [],
   avoidedNearby = [],
   onClose,
+  details,
 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MlMap | null>(null);
@@ -510,8 +515,9 @@ export default function Route3DTour({
           className="w-fit rounded-full px-2.5 py-1 text-[11px] font-semibold text-slate-900 shadow-lg"
           style={{ background: ROUTE_COLOR[profile] ?? "#38bdf8" }}
         >
-          {PROFILE_LABEL[profile] ?? profile} route
+          {details?.title ?? `${PROFILE_LABEL[profile] ?? profile} route`}
         </span>
+        {details && <RouteDetailsToggle description={details} className="pointer-events-auto" />}
         {currentStreet && (
           <span className="w-fit max-w-[22rem] truncate rounded-md bg-slate-950/70 px-2.5 py-1.5 text-sm font-medium text-white shadow-lg backdrop-blur">
             {currentStreet}

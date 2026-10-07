@@ -47,6 +47,13 @@ export interface RoutingEngine {
   outDegree: Uint16Array;
   /** Edges arriving at each node - a node with none can never be reached. */
   inDegree: Uint16Array;
+  /**
+   * 1 for nodes in the city's main street network - reachable from it AND
+   * able to get back to it. Park paths and private service roads form
+   * small islands; a rider-placed stop snapped onto one has no route in or
+   * out, so edited-route stops only snap to these.
+   */
+  inMainNetwork: Uint8Array;
   /** Set when a trained artifact was found; null means the baseline is in use. */
   modelSource: "trained" | "baseline";
   /**
@@ -232,6 +239,8 @@ export function getRoutingEngine(): RoutingEngine {
     if (inDegree[e.to] < 65535) inDegree[e.to]++;
   }
 
+  const spatialIndex = new NodeSpatialIndex(graph.nodes);
+
   // Precomputed once: which edges lie inside a flagged neighbourhood.
   // The safer profiles refuse these outright, so this has to be a cheap
   // array lookup inside the A* inner loop rather than a geometry test.
@@ -336,7 +345,8 @@ export function getRoutingEngine(): RoutingEngine {
     inFlaggedArea,
     outDegree,
     inDegree,
-    index: new NodeSpatialIndex(graph.nodes),
+    inMainNetwork: mainNetwork(graph),
+    index: spatialIndex,
     scores,
     model,
     modelSource: source,
@@ -449,6 +459,12 @@ export interface RouteSummary {
   preferredFewerSignals: boolean;
   /** Ground elevation (m) at each vertex of `path`, same length and order. */
   pathElevations: number[];
+  /**
+   * Set only on a route the rider edited: the stops they chose, in order.
+   * The route is still planned on the street graph with `profile`'s rules
+   * between each pair of stops - editing picks where to go, not how.
+   */
+  customWaypoints?: LatLng[];
 }
 
 /** Above this much extra distance versus the fastest route, say so plainly. */
@@ -965,4 +981,184 @@ function enforceSafetyOrdering(routes: RouteSummary[]): RouteSummary[] {
   }
 
   return order.map((id) => byProfile.get(id)).filter((r): r is RouteSummary => r != null);
+}
+
+
+/** Most stops a rider can add when editing a route. */
+export const MAX_CUSTOM_WAYPOINTS = 8;
+
+/**
+ * Plans ONE route that passes through rider-chosen stops, in order, using a
+ * single profile's rules and the rider's hill/traffic-light preferences on
+ * every leg. This is what "edit the route" runs on: the rider decides where
+ * the route goes; the router still picks the safest streets between stops.
+ *
+ * Each leg is searched separately and the legs are joined. A leg that the
+ * strict profile cannot complete (a stop inside a flagged area, say) is
+ * relaxed exactly as planRoutes does, and the result is labelled best
+ * effort rather than silently breaking the profile's promise.
+ */
+export function planCustomRoute(
+  origin: LatLng,
+  destination: LatLng,
+  waypoints: LatLng[],
+  profileId: RouteProfile["id"],
+  options: PlanOptions = {}
+): RouteSummary {
+  if (waypoints.length > MAX_CUSTOM_WAYPOINTS) {
+    throw new RoutingError(`At most ${MAX_CUSTOM_WAYPOINTS} stops can be added to a route.`);
+  }
+  const avoidElevation = options.avoidElevation ?? false;
+  const fewerSignals = options.fewerSignals ?? false;
+  const eng = getRoutingEngine();
+  const profile = ROUTE_PROFILES[profileId];
+
+  // Stops are passed THROUGH, so they need a way in and a way out.
+  const snap = (p: LatLng, accept: (i: number) => boolean, what: string) => {
+    const n = eng.index.nearest(p, 2000, accept);
+    if (n === null) throw new RoutingError(`${what} is not near any bike-routable street in the covered area.`);
+    return n;
+  };
+  const stops = [
+    snap(origin, (i) => eng.outDegree[i] > 0, "Start point"),
+    ...waypoints.map((w, k) => snap(w, (i) => eng.inMainNetwork[i] === 1, `Stop ${k + 1}`)),
+    snap(destination, (i) => eng.inDegree[i] > 0, "Destination"),
+  ].filter((n, i, all) => i === 0 || n !== all[i - 1]); // two clicks on one corner are one stop
+  if (stops.length < 2) throw new RoutingError("Start and destination resolve to the same point.");
+
+  const scoreOf = (edgeId: number) => eng.scores[edgeId];
+  const inFlagged = (edgeId: number) => eng.inFlaggedArea[edgeId] === 1;
+  const extraPenalty =
+    avoidElevation || fewerSignals
+      ? (edgeId: number) =>
+          (avoidElevation ? eng.elevationPenalty[edgeId] : 0) +
+          (fewerSignals && edgeEntersSignal(eng, edgeId) ? SIGNAL_COST_METERS : 0)
+      : undefined;
+  const search = (from: number, to: number, p: RouteProfile) =>
+    findRoute(eng.graph, scoreOf, from, to, p, { inFlaggedArea: inFlagged, extraPenalty });
+
+  let bestEffort = false;
+  const joined: RoutePath = { path: [], edges: [], distanceMeters: 0, costMeters: 0 };
+  for (let i = 0; i < stops.length - 1; i++) {
+    let leg = search(stops[i], stops[i + 1], profile);
+    if (!leg && profileId !== "fastest") {
+      for (const relaxed of [
+        { ...profile, avoidFlaggedAreas: false },
+        { ...profile, avoidFlaggedAreas: false, hardAvoidScore: Infinity },
+      ]) {
+        leg = search(stops[i], stops[i + 1], relaxed);
+        if (leg) break;
+      }
+      bestEffort = bestEffort || Boolean(leg);
+    }
+    if (!leg) {
+      throw new RoutingError(
+        `Couldn't find a bike route ${i === 0 ? "from the start" : `from stop ${i}`} to ${
+          i === stops.length - 2 ? "the destination" : `stop ${i + 1}`
+        }. Try moving the stop onto a nearby street.`
+      );
+    }
+    // Legs share their junction node; keep it once.
+    joined.path.push(...(i === 0 ? leg.path : leg.path.slice(1)));
+    joined.edges.push(...leg.edges);
+    joined.distanceMeters += leg.distanceMeters;
+    joined.costMeters += leg.costMeters;
+  }
+
+  // Avoidance claims and the detour warning are measured against the plain
+  // fastest A->B route, exactly as for the three standard options.
+  const baseline = search(stops[0], stops[stops.length - 1], ROUTE_PROFILES.fastest);
+  const baselineSummary = baseline
+    ? summarize(baseline, eng.scores, ROUTE_PROFILES.fastest, eng.graph.nodes)
+    : null;
+  const summary = summarize(
+    joined,
+    eng.scores,
+    profile,
+    eng.graph.nodes,
+    new Set(baselineSummary?.neighborhoodsEntered.map((n) => n.name) ?? []),
+    baselineSummary?.distanceMeters ?? 0,
+    {
+      climbMeters: eng.climbMeters,
+      steepSeverity: eng.steepSeverity,
+      avoidElevation,
+      signalAtNode: eng.signalAtNode,
+      fewerSignals,
+      nodeElevation: eng.nodeElevation,
+    }
+  );
+  return {
+    ...summary,
+    label: `My route (${profile.label})${bestEffort ? " · best effort" : ""}`,
+    customWaypoints: waypoints,
+  };
+}
+
+
+/**
+ * The largest strongly connected component of the street graph: every node
+ * in it can reach every other. In SF that is nearly the whole network;
+ * what falls outside is islands (park paths, private service roads).
+ *
+ * Kosaraju, iterative (a recursive DFS overflows the stack on 112k nodes).
+ * An earlier version seeded from one "central" node and took its
+ * component - the seed landed on a 6-node plaza and every stop failed.
+ */
+function mainNetwork(graph: BikeGraph): Uint8Array {
+  const n = graph.nodes.length;
+  const out: number[][] = Array.from({ length: n }, () => []);
+  const back: number[][] = Array.from({ length: n }, () => []);
+  for (const e of graph.edges) {
+    out[e.from].push(e.to);
+    back[e.to].push(e.from);
+  }
+
+  // Pass 1: finish order on the forward graph.
+  const order: number[] = [];
+  const seen = new Uint8Array(n);
+  const next = new Int32Array(n); // per-node cursor into out[]
+  for (let root = 0; root < n; root++) {
+    if (seen[root]) continue;
+    seen[root] = 1;
+    const stack = [root];
+    while (stack.length) {
+      const v = stack[stack.length - 1];
+      if (next[v] < out[v].length) {
+        const w = out[v][next[v]++];
+        if (!seen[w]) {
+          seen[w] = 1;
+          stack.push(w);
+        }
+      } else {
+        order.push(stack.pop()!);
+      }
+    }
+  }
+
+  // Pass 2: components on the reverse graph, in reverse finish order.
+  const comp = new Int32Array(n).fill(-1);
+  const sizes: number[] = [];
+  for (let k = order.length - 1; k >= 0; k--) {
+    const root = order[k];
+    if (comp[root] !== -1) continue;
+    const id = sizes.length;
+    let size = 0;
+    const stack = [root];
+    comp[root] = id;
+    while (stack.length) {
+      const v = stack.pop()!;
+      size++;
+      for (const w of back[v]) if (comp[w] === -1) {
+        comp[w] = id;
+        stack.push(w);
+      }
+    }
+    sizes.push(size);
+  }
+
+  let largest = 0;
+  for (let i = 1; i < sizes.length; i++) if (sizes[i] > sizes[largest]) largest = i;
+  const result = new Uint8Array(n);
+  for (let i = 0; i < n; i++) result[i] = comp[i] === largest ? 1 : 0;
+  return result;
 }
