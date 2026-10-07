@@ -18,6 +18,7 @@ export interface DescribableRoute {
   preferredFewerSignals: boolean;
   trafficSignals: number;
   elevationGainMeters: number;
+  elevationLossMeters: number;
   /** Present only on a route the rider edited. */
   customWaypoints?: unknown[];
 }
@@ -77,7 +78,7 @@ export function describeRoute(route: DescribableRoute, minutes: string): RouteDe
       `${(route.distanceMeters / MI).toFixed(1)} mi · ~${minutes} min`,
       `${Math.round(route.protectedLaneFraction * 100)}% on protected lanes`,
       `${route.trafficSignals} traffic light${route.trafficSignals === 1 ? "" : "s"}`,
-      `${Math.round(route.elevationGainMeters * 3.281)} ft of climbing`,
+      `▲ ${Math.round(route.elevationGainMeters * 3.281)} ft / ▼ ${Math.round(route.elevationLossMeters * 3.281)} ft`,
     ],
   };
 }

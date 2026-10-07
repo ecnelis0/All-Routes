@@ -38,6 +38,8 @@ import type { LatLng } from "@/lib/types";
 import { ROUTE_PROFILES } from "@/lib/routing/cost";
 import type { RouteDescription } from "@/lib/ui/routeDescription";
 import { RouteDetailsToggle } from "@/components/RouteChoices";
+import ElevationPanel from "@/components/ElevationPanel";
+import { buildElevationProfile } from "@/lib/tour/elevationProfile";
 
 /**
  * Cinematic 3D fly-through of a route, over real aerial imagery and real
@@ -133,6 +135,10 @@ export default function Route3DTour({
   const buildingsRef = useRef<Awaited<ReturnType<typeof fetchCorridorBuildings>> | null>(null);
 
   const metersDone = totalMeters * progress;
+  const elevationProfile = useMemo(
+    () => (pathElevations ? buildElevationProfile(path, pathElevations) : null),
+    [path, pathElevations]
+  );
   const currentStreet = currentStreetAt(streetSpans, metersDone);
   const annotations = useMemo(
     () => buildAnnotations(protectedSpans, avoidedNearby),
@@ -665,6 +671,11 @@ export default function Route3DTour({
         >
           {realBuildings.toLocaleString()} buildings · SF LiDAR footprints
         </div>
+      )}
+      {elevationProfile && ready && (
+        // The camera path and the elevation profile measure the same
+        // polyline, so progress maps onto it directly.
+        <ElevationPanel profile={elevationProfile} meters={elevationProfile.totalMeters * progress} />
       )}
       {tileWarning && !fatalError && (
         <div

@@ -72,11 +72,13 @@ describe("the owner's steep list, checked against terrain", () => {
     for (const e of eng.graph.edges) {
       const sev = eng.steepSeverity[e.id];
       if (!sev) continue;
-      const climb = eng.climbMeters[e.id];
-      expect(climb).toBeGreaterThan(0);
+      // Steep in EITHER direction: steep descents are charged too, since
+      // "avoid hills" means least elevation change, not least climbing.
+      const change = Math.abs(eng.climbMeters[e.id]);
+      expect(change).toBeGreaterThan(0);
       // Small tolerance: climbs are stored as Float32, so a block computed
       // at exactly the 6% threshold reads back as 5.9999998%.
-      expect(climb / Math.max(e.lengthMeters, 15)).toBeGreaterThanOrEqual(
+      expect(change / Math.max(e.lengthMeters, 15)).toBeGreaterThanOrEqual(
         STEEP_GRADE_THRESHOLD - 1e-6
       );
     }
@@ -129,6 +131,33 @@ describe("avoid elevation", () => {
     }
     expect(gainOn).toBeLessThan(gainOff);
     expect(distOn).toBeLessThan(distOff * 1.25);
+  });
+
+  it("minimises total elevation change - up AND down - across hilly trips", () => {
+    const trips = [
+      [{ lat: 37.7599, lng: -122.4148 }, { lat: 37.734, lng: -122.434 }],
+      [{ lat: 37.788, lng: -122.4075 }, { lat: 37.803, lng: -122.436 }],
+      [{ lat: 37.7609, lng: -122.435 }, { lat: 37.7576, lng: -122.4004 }],
+    ] as const;
+    let off = 0;
+    let on = 0;
+    for (const [A, B] of trips) {
+      for (const r of planRoutes(A, B)) off += r.elevationGainMeters + r.elevationLossMeters;
+      for (const r of planRoutes(A, B, { avoidElevation: true })) on += r.elevationGainMeters + r.elevationLossMeters;
+    }
+    expect(on).toBeLessThan(off);
+  });
+
+  it("keeps steep DESCENTS off the route too", () => {
+    // Fillmore & Broadway -> Marina is nearly all downhill. Charging only
+    // climbs left descents free, so "Avoid hills" sent riders straight down
+    // Fillmore at 23.8%. A trip with climbs in it cannot tell the two rules
+    // apart (avoiding the climbs avoids the descents too) - it has to be a
+    // downhill trip.
+    const A = { lat: 37.7943, lng: -122.4341 };
+    const B = { lat: 37.8035, lng: -122.436 };
+    const r = planRoutes(A, B, { avoidElevation: true }).find((x) => x.profile === "fastest")!;
+    expect(r.maxDownGradePercent).toBeLessThan(15);
   });
 
   it("reports the setting on every route it returns", () => {

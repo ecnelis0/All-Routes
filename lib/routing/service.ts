@@ -109,8 +109,19 @@ const SIGNAL_COST_METERS = 120;
 const SIGNAL_MATCH_METERS = 18;
 
 /**
- * Flat-equivalent metres charged per metre climbed when avoiding
- * elevation. Deliberately above the 8-12m cycling rule of thumb for
+ * Flat-equivalent metres charged per metre of elevation CHANGE - climbed
+ * or descended - when avoiding hills. The owner asked for "least change",
+ * not just least climbing.
+ *
+ * Worth knowing: on a trip from A to B, total descent = total climb -
+ * (height(B) - height(A)), and that last term is fixed for the trip. So
+ * under a purely linear charge, "least total change" and "least climbing"
+ * pick the SAME route. What charging descents actually changes is the
+ * non-linear part: the steep surcharge, the wall cost and the owner's
+ * severity list now apply to steep DOWNHILL blocks too, which matter on a
+ * bike (braking, speed) and used to cost nothing.
+ *
+ * Original tuning note, per metre climbed: Deliberately above the 8-12m cycling rule of thumb for
  * effort: this mode is opt-in, and a rider who switches on "avoid hills"
  * wants hills avoided, not merely discounted. Swept across four hilly
  * trips: at 10 the aggregate climbing fell 25% but individual routes like
@@ -269,12 +280,14 @@ export function getRoutingEngine(): RoutingEngine {
   for (const edge of graph.edges) {
     const climb = (elev.elevDm[edge.to] - elev.elevDm[edge.from]) / 10;
     climbMeters[edge.id] = climb;
-    if (climb <= 0) continue;
+    // Up or down, every metre of change counts - see CLIMB_COST_PER_METRE.
+    const change = Math.abs(climb);
+    if (change === 0) continue;
 
     // Grade, with short fragments clamped so DEM interpolation noise on a
     // 6m sliver cannot masquerade as a 20% wall.
     const run = Math.max(edge.lengthMeters, MIN_EDGE_FOR_GRADE_METERS);
-    const grade = climb / run;
+    const grade = change / run;
 
     // Severity from the owner's list - but only where the terrain confirms
     // the block is genuinely steep. Flat 24th Street in the Mission is
@@ -295,7 +308,7 @@ export function getRoutingEngine(): RoutingEngine {
     const steepFactor = grade > STEEP_SURCHARGE_GRADE ? 1 + (grade - STEEP_SURCHARGE_GRADE) * 25 : 1;
     const listFactor = sev ? SEVERITY_MULTIPLIER[sev] : 1;
     elevationPenalty[edge.id] =
-      climb * CLIMB_COST_PER_METRE * steepFactor * listFactor +
+      change * CLIMB_COST_PER_METRE * steepFactor * listFactor +
       (grade > WALL_GRADE ? edge.lengthMeters * WALL_COST_PER_METRE : 0);
   }
 
@@ -443,6 +456,10 @@ export interface RouteSummary {
   elevationGainMeters: number;
   /** Steepest climbing block on the route, as a percentage grade. */
   maxGradePercent: number;
+  /** Total metres descended. Gain + loss is the route's total elevation change. */
+  elevationLossMeters: number;
+  /** Steepest descending block, as a positive percentage grade. */
+  maxDownGradePercent: number;
   /**
    * Stretches the route climbs that the owner's steep list flags, merged by
    * street and severity, so the UI can name the hard parts.
@@ -530,6 +547,8 @@ function summarize(
   const classSpans: RouteSummary["classSpans"] = [];
   let gain = 0;
   let maxGrade = 0;
+  let loss = 0;
+  let maxDownGrade = 0;
   const steep = new Map<string, { meters: number; severity: SteepSeverity }>();
   const signalsSeen = new Set<number>();
   let metersInFlaggedAreas = 0;
@@ -626,6 +645,10 @@ function summarize(
 
     if (elevation) {
       const climb = elevation.climbMeters[e.id];
+      if (climb < 0) {
+        loss -= climb;
+        if (e.lengthMeters >= 25) maxDownGrade = Math.max(maxDownGrade, -climb / e.lengthMeters);
+      }
       if (climb > 0) {
         gain += climb;
         // Ignore grades on very short fragments: at ~10m DEM resolution a
@@ -698,6 +721,8 @@ function summarize(
       })),
     elevationGainMeters: Math.round(gain),
     maxGradePercent: Math.round(maxGrade * 1000) / 10,
+    elevationLossMeters: Math.round(loss),
+    maxDownGradePercent: Math.round(maxDownGrade * 1000) / 10,
     steepClimbs: [...steep.entries()]
       .map(([name, v]) => ({ name, severity: v.severity, meters: Math.round(v.meters) }))
       .filter((c) => c.meters >= 30)

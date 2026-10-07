@@ -713,6 +713,7 @@ export default function Home() {
                         ["Protected lanes", `${Math.round(editOriginal.protectedLaneFraction * 100)}%`, `${Math.round(draftRoute.protectedLaneFraction * 100)}%`],
                         ["Traffic lights", String(editOriginal.trafficSignals), String(draftRoute.trafficSignals)],
                         ["Climbing", `${Math.round(editOriginal.elevationGainMeters * 3.281)} ft`, `${Math.round(draftRoute.elevationGainMeters * 3.281)} ft`],
+                        ["Dropping", `${Math.round(editOriginal.elevationLossMeters * 3.281)} ft`, `${Math.round(draftRoute.elevationLossMeters * 3.281)} ft`],
                         ["In flagged areas", `${metersToMiles(editOriginal.metersInFlaggedAreas)} mi`, `${metersToMiles(draftRoute.metersInFlaggedAreas)} mi`],
                       ].map(([k, a, b]) => (
                         <tr key={k}>
@@ -792,9 +793,10 @@ export default function Home() {
                   <span className="font-medium">{activeRoute.trafficSignals}</span>
                 </div>
                 <div className="flex justify-between">
-                  <span>Elevation gain</span>
-                  <span className="font-medium">
-                    {Math.round(activeRoute.elevationGainMeters * 3.281)} ft
+                  <span>Elevation change</span>
+                  <span className="font-medium" title="Climbed / dropped">
+                    ▲ {Math.round(activeRoute.elevationGainMeters * 3.281)} ft · ▼{" "}
+                    {Math.round(activeRoute.elevationLossMeters * 3.281)} ft
                   </span>
                 </div>
                 <div className="flex justify-between">
@@ -803,6 +805,14 @@ export default function Home() {
                     className={`font-medium ${activeRoute.maxGradePercent >= 12 ? "text-red-600" : ""}`}
                   >
                     {activeRoute.maxGradePercent}%
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span>Steepest descent</span>
+                  <span
+                    className={`font-medium ${activeRoute.maxDownGradePercent >= 12 ? "text-red-600" : ""}`}
+                  >
+                    {activeRoute.maxDownGradePercent}%
                   </span>
                 </div>
                 <div className="flex justify-between">

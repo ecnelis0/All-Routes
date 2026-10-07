@@ -12,6 +12,7 @@ const base: DescribableRoute = {
   preferredFewerSignals: false,
   trafficSignals: 12,
   elevationGainMeters: 30,
+  elevationLossMeters: 12,
 };
 
 const texts = (r: DescribableRoute) => describeRoute(r, "18").choices.map((c) => c.text);
@@ -26,7 +27,7 @@ describe("describeRoute", () => {
       "Avoided hills",
       "Did not avoid traffic lights",
     ]);
-    expect(d.stats).toEqual(["2.5 mi · ~18 min", "42% on protected lanes", "12 traffic lights", "98 ft of climbing"]);
+    expect(d.stats).toEqual(["2.5 mi · ~18 min", "42% on protected lanes", "12 traffic lights", "▲ 98 ft / ▼ 39 ft"]);
   });
 
   it("is honest when a safe option could not avoid every area", () => {
