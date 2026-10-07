@@ -51,8 +51,9 @@ interface LayersResponse {
 // had to be relaxed), and that takes precedence when shown.
 const ROUTE_TABS: { kind: RouteProfileId; label: string; hint: string }[] = [
   { kind: "fastest", label: "Fastest", hint: "Shortest legal bike route" },
-  { kind: "balanced", label: "Safest", hint: "Avoids every flagged area" },
-  { kind: "safest", label: "Safest + bike lanes", hint: "Also keeps to protected lanes" },
+  // Matches the area rules in lib/routing/service.ts (AREA_DETOUR_LIMIT).
+  { kind: "balanced", label: "Safest", hint: "Never Severe areas; others unless the detour passes 40%" },
+  { kind: "safest", label: "Safest + bike lanes", hint: "Same, and keeps to protected lanes" },
 ];
 
 function metersToMiles(m: number): string {
@@ -904,7 +905,20 @@ export default function Home() {
                       {activeRoute.neighborhoodsEntered.map((n) => (
                         <li key={n.name}>
                           {n.name}{" "}
-                          <span className="text-black/60">({metersToMiles(n.meters)} mi)</span>
+                          <span
+                            className={`rounded px-1 text-[10px] font-semibold ${
+                              n.tier === "Severe"
+                                ? "bg-red-100 text-red-800"
+                                : n.tier === "High"
+                                  ? "bg-orange-100 text-orange-800"
+                                  : "bg-amber-100 text-amber-800"
+                            }`}
+                          >
+                            {n.tier}
+                          </span>{" "}
+                          <span className="text-black/60">
+                            ({metersToMiles(n.meters)} mi{n.atEndpoint ? ", trip starts or ends here" : ""})
+                          </span>
                         </li>
                       ))}
                     </ul>

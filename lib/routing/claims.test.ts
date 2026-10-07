@@ -42,18 +42,40 @@ function allRoutes() {
 const ALL = allRoutes();
 
 describe("flagged-area avoidance is a promise, not a preference", () => {
-  it("the safer profiles clear flagged areas unless explicitly marked best-effort", () => {
-    // Before hard avoidance, area risk was one feature worth ~21 danger
-    // points, easily outweighed by a shorter distance - "Safer" routinely
-    // returned the identical path to "Fastest" and still crossed the
-    // Tenderloin.
+  it("the safer profiles never enter a Severe area unless the trip starts or ends in it", () => {
+    // The owner's rule: Severe areas are skipped whatever the detour.
     for (const { pair, routes } of ALL) {
       for (const r of routes) {
         if (r.profile === "fastest") continue;
-        if (/best effort/i.test(r.label)) continue;
-        expect(r.metersInFlaggedAreas, `${pair} [${r.profile}] ${r.label}`).toBe(0);
+        for (const n of r.neighborhoodsEntered) {
+          if (n.tier === "Severe") expect(n.atEndpoint, `${pair} [${r.profile}] ${n.name}`).toBe(true);
+        }
       }
     }
+  });
+
+  it("enters High/Elevated areas only when it says why", () => {
+    // Either the trip starts/ends there, or staying out broke the detour
+    // limit and the route carries the trade-off it made.
+    for (const { pair, routes } of ALL) {
+      for (const r of routes) {
+        if (r.profile === "fastest") continue;
+        for (const n of r.neighborhoodsEntered) {
+          if (n.atEndpoint) continue;
+          expect(r.areaTradeoff, `${pair} [${r.profile}] entered ${n.name} without a reason`).toBeTruthy();
+        }
+      }
+    }
+  });
+
+  it("one unavoidable area no longer switches off avoidance of all the others", () => {
+    // Richmond -> Potrero Hill ends inside Potrero Hill. The old fallback
+    // then stopped avoiding EVERY area and rode through SoMa and Civic
+    // Center (both Severe) on the way.
+    const r = planRoutes({ lat: 37.78, lng: -122.47 }, { lat: 37.758, lng: -122.398 }).find(
+      (x) => x.profile === "balanced"
+    )!;
+    expect(r.neighborhoodsEntered.map((n) => n.name)).toEqual(["Potrero Hill"]);
   });
 
   it("cuts flagged exposure far below the fastest route on average", () => {

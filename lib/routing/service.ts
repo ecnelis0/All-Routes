@@ -72,6 +72,8 @@ export interface RoutingEngine {
   laneMatch: LaneMatchStats;
   /** Per-edge: does this edge's midpoint sit inside a flagged neighbourhood? */
   inFlaggedArea: Uint8Array;
+  /** Bit i set when the edge lies in SF_DANGEROUS_NEIGHBORHOODS[i] - see areaPolicy. */
+  areaMask: Uint32Array;
   /** Per directed edge: metres climbed travelling from `from` to `to` (negative = descent). */
   climbMeters: Float32Array;
   /** Per node: ground elevation in metres. */
@@ -256,11 +258,15 @@ export function getRoutingEngine(): RoutingEngine {
   // The safer profiles refuse these outright, so this has to be a cheap
   // array lookup inside the A* inner loop rather than a geometry test.
   const inFlaggedArea = new Uint8Array(graph.edges.length);
+  const areaMask = new Uint32Array(graph.edges.length);
+  if (SF_DANGEROUS_NEIGHBORHOODS.length > 32) throw new Error("areaMask holds at most 32 flagged areas.");
   for (const edge of graph.edges) {
     const a = graph.nodes[edge.from];
     const b = graph.nodes[edge.to];
     const mid = { lat: (a.lat + b.lat) / 2, lng: (a.lng + b.lng) / 2 };
-    if (areasContaining(mid, SF_DANGEROUS_NEIGHBORHOODS).length > 0) inFlaggedArea[edge.id] = 1;
+    const mask = areaBits(mid);
+    areaMask[edge.id] = mask;
+    if (mask !== 0) inFlaggedArea[edge.id] = 1;
   }
 
   // ELEVATION. Heights are per node index, which is positional, so a
@@ -356,6 +362,7 @@ export function getRoutingEngine(): RoutingEngine {
     elevationPenalty,
     steepSeverity,
     inFlaggedArea,
+    areaMask,
     outDegree,
     inDegree,
     inMainNetwork: mainNetwork(graph),
@@ -405,7 +412,20 @@ export interface RouteSummary {
    * mean-danger improvement can hide a route that still crosses the same
    * districts on marginally better streets.
    */
-  neighborhoodsEntered: { name: string; meters: number }[];
+  neighborhoodsEntered: {
+    name: string;
+    meters: number;
+    tier: AreaTier;
+    /** The start or destination is inside this area, so it could not be avoided. */
+    atEndpoint: boolean;
+  }[];
+  /**
+   * Set when a safer profile went through High/Elevated areas on purpose
+   * because staying out of all of them broke AREA_DETOUR_LIMIT.
+   * `avoidAllExtraPercent` is how much longer than Fastest the stay-out
+   * route was (null when no stay-out route exists at all).
+   */
+  areaTradeoff?: { avoidAllExtraPercent: number | null; limitPercent: number } | null;
   /** Total distance ridden inside any flagged neighbourhood. */
   metersInFlaggedAreas: number;
   /**
@@ -502,6 +522,82 @@ function distanceMeters(a: LatLng, b: LatLng): number {
 }
 
 /** Which flagged areas contain this point. */
+// ---------------------------------------------------------------------------
+// FLAGGED AREAS: how far the safer profiles go to stay out of them.
+//
+// The owner's rule: Severe areas are skipped whatever the detour. High and
+// Elevated areas are skipped too - unless staying out of them makes the
+// detour significant, in which case a smaller detour through them is
+// better than, say, 20 extra minutes on a 30 minute ride.
+//
+// So, per safer profile:
+//   1. "strict": every flagged area blocked. Used if the result is at most
+//      AREA_DETOUR_LIMIT longer than the fastest route.
+//   2. "budget": Severe still blocked; High/Elevated allowed at a price -
+//      each metre inside costs AREA_COST_PER_METRE extra metres of riding,
+//      so the route goes through only where going round costs more.
+//   3. "off": nothing blocked (only if 1 and 2 find no route at all).
+// An area containing the start or destination cannot be avoided; it is
+// exempt from blocking (priced instead, so the route leaves it directly)
+// and - unlike before - exempting it no longer switches off avoidance of
+// every OTHER area.
+
+export type AreaTier = "Severe" | "High" | "Elevated";
+/** Avoiding High/Elevated areas may lengthen the trip by at most this vs Fastest. */
+export const AREA_DETOUR_LIMIT = 0.4;
+/** Extra metres charged per metre ridden inside an area, when it is allowed at all. */
+export const AREA_COST_PER_METRE: Record<AreaTier, number> = {
+  Severe: 3, // only ever paid inside an exempt (start/end) area: leave it fast
+  High: 1,
+  Elevated: 0.3,
+};
+
+export function areaTier(risk: number): AreaTier {
+  return risk >= 85 ? "Severe" : risk >= 70 ? "High" : "Elevated";
+}
+
+const SEVERE_BITS = SF_DANGEROUS_NEIGHBORHOODS.reduce(
+  (m, a, i) => (areaTier(a.risk) === "Severe" ? m | (1 << i) : m),
+  0
+);
+
+function areaBits(p: LatLng): number {
+  let mask = 0;
+  SF_DANGEROUS_NEIGHBORHOODS.forEach((a, i) => {
+    const dLat = (p.lat - a.center.lat) * 111_320;
+    const dLng = (p.lng - a.center.lng) * 111_320 * Math.cos((p.lat * Math.PI) / 180);
+    if (Math.sqrt(dLat * dLat + dLng * dLng) <= a.radiusMeters) mask |= 1 << i;
+  });
+  return mask;
+}
+
+/** Areas containing any of these points - unavoidable, so exempt from blocking. */
+function exemptAreaBits(points: LatLng[]): number {
+  return points.reduce((m, p) => m | areaBits(p), 0);
+}
+
+export type AreaMode = "strict" | "budget" | "off";
+
+export function areaPolicy(eng: RoutingEngine, exempt: number, mode: AreaMode) {
+  const blockedBits = mode === "strict" ? ~exempt : mode === "budget" ? SEVERE_BITS & ~exempt : 0;
+  const rateOf = (mask: number) => {
+    let rate = 0;
+    for (let i = 0; mask; i++, mask >>>= 1) {
+      if (mask & 1) rate = Math.max(rate, AREA_COST_PER_METRE[areaTier(SF_DANGEROUS_NEIGHBORHOODS[i].risk)]);
+    }
+    return rate;
+  };
+  return {
+    blocked: (edgeId: number) => (eng.areaMask[edgeId] & blockedBits) !== 0,
+    // Anything inside an area that is not blocked is priced: exempt areas
+    // (to leave them directly) and, in budget mode, High/Elevated ones.
+    penalty: (edgeId: number) => {
+      const priced = eng.areaMask[edgeId] & ~blockedBits;
+      return priced ? eng.graph.edges[edgeId].lengthMeters * rateOf(priced) : 0;
+    },
+  };
+}
+
 function areasContaining(p: LatLng, areas: DangerousNeighborhood[]): DangerousNeighborhood[] {
   const out: DangerousNeighborhood[] = [];
   for (const a of areas) {
@@ -528,6 +624,8 @@ function summarize(
     signalAtNode?: Int32Array;
     fewerSignals?: boolean;
     nodeElevation?: Float32Array;
+    /** Names of areas containing the start or destination. */
+    endpointAreas?: Set<string>;
   } | null = null
 ): RouteSummary {
   const tierBreakdown: Record<BikeLaneTier, number> = {
@@ -706,7 +804,12 @@ function summarize(
       endMeters: Math.round(sp.endMeters),
     })),
     neighborhoodsEntered: [...perArea.entries()]
-      .map(([name, meters]) => ({ name, meters: Math.round(meters) }))
+      .map(([name, meters]) => ({
+        name,
+        meters: Math.round(meters),
+        tier: areaTier(SF_DANGEROUS_NEIGHBORHOODS.find((a) => a.name === name)?.risk ?? 0),
+        atEndpoint: elevation?.endpointAreas?.has(name) ?? false,
+      }))
       .sort((x, y) => y.meters - x.meters),
     metersInFlaggedAreas: Math.round(metersInFlaggedAreas),
     // Short slivers are OSM fragmentation, not a protected lane you would
@@ -853,7 +956,6 @@ export function planRoutes(
 
   for (const id of ["fastest", "balanced", "safest"] as const) {
     const profile = ROUTE_PROFILES[id];
-    const inFlagged = (edgeId: number) => eng.inFlaggedArea[edgeId] === 1;
     // Opt-in preferences compose additively. A signal is charged once, on
     // the edge that ENTERS its intersection from outside. Charging every
     // edge that arrives at a flagged node over-billed badly: 18m around a
@@ -867,59 +969,88 @@ export function planRoutes(
             (avoidElevation ? eng.elevationPenalty[edgeId] : 0) +
             (fewerSignals && entersSignal(edgeId) ? SIGNAL_COST_METERS : 0)
         : undefined;
-    let route = findRoute(eng.graph, scoreOf, startNode, goalNode, profile, {
-      inFlaggedArea: inFlagged,
-      extraPenalty,
-    });
-    let bestEffort = false;
+    // Areas holding the start or destination cannot be avoided (see
+    // areaPolicy). Checked at both the typed point and the snapped node.
+    const exempt = exemptAreaBits([origin, destination, eng.graph.nodes[startNode], eng.graph.nodes[goalNode]]);
+    const endpointAreas = new Set(
+      SF_DANGEROUS_NEIGHBORHOODS.filter((_, i) => exempt & (1 << i)).map((a) => a.name)
+    );
+    const search = (p: RouteProfile, mode: AreaMode) => {
+      const policy = areaPolicy(eng, exempt, mode);
+      return findRoute(eng.graph, scoreOf, startNode, goalNode, p, {
+        inFlaggedArea: policy.blocked,
+        extraPenalty: (edgeId: number) =>
+          (extraPenalty ? extraPenalty(edgeId) : 0) + (p.avoidFlaggedAreas ? policy.penalty(edgeId) : 0),
+      });
+    };
 
-    // A strict profile can cut the graph into disconnected pieces - if every
-    // road out of a neighbourhood scores above `hardAvoidScore`, there is
-    // genuinely no qualifying route. Falling back to the next-laxer profile
-    // beats returning nothing, but the caller should be able to tell, hence
-    // the distinct label.
-    if (!route && id !== "fastest") {
-      // Hard avoidance can make the goal unreachable - the destination
-      // may itself be inside a flagged area, which is common and
-      // perfectly legitimate. Relax in stages so the answer degrades
-      // rather than disappearing, and say so in the label.
-      const stages: RouteProfile[] = [
-        { ...profile, avoidFlaggedAreas: false },
-        { ...profile, avoidFlaggedAreas: false, hardAvoidScore: Infinity },
-      ];
-      for (const relaxed of stages) {
-        route = findRoute(eng.graph, scoreOf, startNode, goalNode, relaxed, {
-          inFlaggedArea: inFlagged,
-          extraPenalty,
-        });
-        if (route) break;
-      }
-      bestEffort = Boolean(route);
-      if (route) {
-        out.push({
-          ...summarize(route, eng.scores, profile, eng.graph.nodes, baselineEntered, baselineMeters, { climbMeters: eng.climbMeters, steepSeverity: eng.steepSeverity, avoidElevation, signalAtNode: eng.signalAtNode, fewerSignals, nodeElevation: eng.nodeElevation }),
-          // Short enough for a tab; the panel explains it in full.
-          label: `${profile.label} · best effort`,
-        });
-        continue;
+    let route: RoutePath | null = null;
+    let bestEffort = false;
+    let areaTradeoff: RouteSummary["areaTradeoff"] = null;
+    if (!profile.avoidFlaggedAreas) {
+      route = search(profile, "off");
+    } else {
+      // The area rules, for one danger ceiling:
+      //   1. stay out of every area, if that is within the detour limit;
+      //   2. otherwise Severe stays blocked and High/Elevated become a
+      //      price, so the route goes through only where going round
+      //      costs more - and records the trade-off it made.
+      const underAreaRules = (p: RouteProfile): { route: RoutePath | null; tradeoff: RouteSummary["areaTradeoff"] } => {
+        const strict = search(p, "strict");
+        if (strict && strict.distanceMeters <= baselineMeters * (1 + AREA_DETOUR_LIMIT)) {
+          return { route: strict, tradeoff: null };
+        }
+        const budget = search(p, "budget");
+        if (budget && (!strict || budget.distanceMeters < strict.distanceMeters)) {
+          return {
+            route: budget,
+            tradeoff: {
+              avoidAllExtraPercent: strict
+                ? Math.round((strict.distanceMeters / Math.max(1, baselineMeters) - 1) * 100)
+                : null,
+              limitPercent: Math.round(AREA_DETOUR_LIMIT * 100),
+            },
+          };
+        }
+        return { route: strict, tradeoff: null };
+      };
+
+      ({ route, tradeoff: areaTradeoff } = underAreaRules(profile));
+      // The danger ceiling can wall a trip in. Lift it - but keep the area
+      // rules (an earlier fallback skipped straight to pricing areas and
+      // rode through Chinatown with no reason given) - and only then, as
+      // a last resort, stop blocking Severe areas.
+      if (!route) {
+        const lifted = { ...profile, hardAvoidScore: Infinity };
+        ({ route, tradeoff: areaTradeoff } = underAreaRules(lifted));
+        if (!route) route = search(lifted, "off");
+        bestEffort = Boolean(route);
       }
     }
 
     if (route) {
-      const summary = summarize(
-        route,
-        eng.scores,
-        profile,
-        eng.graph.nodes,
-        baselineEntered,
-        baselineMeters,
-        { climbMeters: eng.climbMeters, steepSeverity: eng.steepSeverity, avoidElevation, signalAtNode: eng.signalAtNode, fewerSignals, nodeElevation: eng.nodeElevation }
-      );
+      const summary = summarize(route, eng.scores, profile, eng.graph.nodes, baselineEntered, baselineMeters, {
+        climbMeters: eng.climbMeters,
+        steepSeverity: eng.steepSeverity,
+        avoidElevation,
+        signalAtNode: eng.signalAtNode,
+        fewerSignals,
+        nodeElevation: eng.nodeElevation,
+        endpointAreas,
+      });
       if (id === "fastest") {
         baselineEntered = new Set(summary.neighborhoodsEntered.map((n) => n.name));
         baselineMeters = summary.distanceMeters;
       }
-      out.push(summary);
+      // "Best effort" = it could not stay out of every area: the start or
+      // destination is inside one, or the fallbacks were needed.
+      const unavoidable = profile.avoidFlaggedAreas && summary.neighborhoodsEntered.some((n) => n.atEndpoint);
+      out.push({
+        ...summary,
+        areaTradeoff,
+        // Short enough for a tab; the panel explains it in full.
+        label: bestEffort || unavoidable ? `${profile.label} · best effort` : summary.label,
+      });
     }
   }
 
@@ -1052,26 +1183,32 @@ export function planCustomRoute(
   if (stops.length < 2) throw new RoutingError("Start and destination resolve to the same point.");
 
   const scoreOf = (edgeId: number) => eng.scores[edgeId];
-  const inFlagged = (edgeId: number) => eng.inFlaggedArea[edgeId] === 1;
   const extraPenalty =
     avoidElevation || fewerSignals
       ? (edgeId: number) =>
           (avoidElevation ? eng.elevationPenalty[edgeId] : 0) +
           (fewerSignals && edgeEntersSignal(eng, edgeId) ? SIGNAL_COST_METERS : 0)
       : undefined;
-  const search = (from: number, to: number, p: RouteProfile) =>
-    findRoute(eng.graph, scoreOf, from, to, p, { inFlaggedArea: inFlagged, extraPenalty });
+  // Same area rules as the stock routes, per leg: a stop the rider placed
+  // inside an area makes that area unavoidable for the legs touching it,
+  // and only that area. Legs use "budget" directly - there is no single
+  // fastest-route baseline per leg to hold a detour limit against.
+  const search = (from: number, to: number, p: RouteProfile, mode: AreaMode = "budget") => {
+    const policy = areaPolicy(eng, exemptAreaBits([eng.graph.nodes[from], eng.graph.nodes[to]]), mode);
+    return findRoute(eng.graph, scoreOf, from, to, p, {
+      inFlaggedArea: policy.blocked,
+      extraPenalty: (edgeId: number) =>
+        (extraPenalty ? extraPenalty(edgeId) : 0) + (p.avoidFlaggedAreas ? policy.penalty(edgeId) : 0),
+    });
+  };
 
   let bestEffort = false;
   const joined: RoutePath = { path: [], edges: [], distanceMeters: 0, costMeters: 0 };
   for (let i = 0; i < stops.length - 1; i++) {
     let leg = search(stops[i], stops[i + 1], profile);
     if (!leg && profileId !== "fastest") {
-      for (const relaxed of [
-        { ...profile, avoidFlaggedAreas: false },
-        { ...profile, avoidFlaggedAreas: false, hardAvoidScore: Infinity },
-      ]) {
-        leg = search(stops[i], stops[i + 1], relaxed);
+      for (const mode of ["budget", "off"] as const) {
+        leg = search(stops[i], stops[i + 1], { ...profile, hardAvoidScore: Infinity }, mode);
         if (leg) break;
       }
       bestEffort = bestEffort || Boolean(leg);
@@ -1110,11 +1247,18 @@ export function planCustomRoute(
       signalAtNode: eng.signalAtNode,
       fewerSignals,
       nodeElevation: eng.nodeElevation,
+      // Areas holding the start, the destination or a stop the rider chose.
+      endpointAreas: new Set(
+        SF_DANGEROUS_NEIGHBORHOODS.filter(
+          (_, i) => exemptAreaBits(stops.map((n) => eng.graph.nodes[n])) & (1 << i)
+        ).map((a) => a.name)
+      ),
     }
   );
+  const unavoidable = profile.avoidFlaggedAreas && summary.neighborhoodsEntered.some((n) => n.atEndpoint);
   return {
     ...summary,
-    label: `My route (${profile.label})${bestEffort ? " · best effort" : ""}`,
+    label: `My route (${profile.label})${bestEffort || unavoidable ? " · best effort" : ""}`,
     customWaypoints: waypoints,
   };
 }

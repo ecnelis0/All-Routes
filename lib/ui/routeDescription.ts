@@ -19,6 +19,13 @@ export interface DescribableRoute {
   trafficSignals: number;
   elevationGainMeters: number;
   elevationLossMeters: number;
+  neighborhoodsEntered: {
+    name: string;
+    meters: number;
+    tier: "Severe" | "High" | "Elevated";
+    atEndpoint: boolean;
+  }[];
+  areaTradeoff?: { avoidAllExtraPercent: number | null; limitPercent: number } | null;
   /** Present only on a route the rider edited. */
   customWaypoints?: unknown[];
 }
@@ -33,8 +40,59 @@ export interface RouteDescription {
 
 const MI = 1609.34;
 
+/**
+ * The area rules, said plainly: Severe areas are skipped whatever the
+ * detour; High/Elevated ones unless staying out of all of them breaks the
+ * detour limit. An area the trip starts or ends in cannot be avoided, and
+ * is named as such rather than counted as a failure.
+ */
+function areaChoices(route: DescribableRoute): RouteDescription["choices"] {
+  const fmt = (n: DescribableRoute["neighborhoodsEntered"][number]) =>
+    `${n.name} (${n.tier}, ${(n.meters / MI).toFixed(1)} mi)`;
+  const names = (ns: DescribableRoute["neighborhoodsEntered"]) => ns.map((n) => n.name).join(", ");
+  const severe = route.neighborhoodsEntered.filter((n) => n.tier === "Severe");
+  const lower = route.neighborhoodsEntered.filter((n) => n.tier !== "Severe");
+  const sevThrough = severe.filter((n) => !n.atEndpoint);
+  const sevEnd = severe.filter((n) => n.atEndpoint);
+  const lowThrough = lower.filter((n) => !n.atEndpoint);
+  const lowEnd = lower.filter((n) => n.atEndpoint);
+  const out: RouteDescription["choices"] = [];
+
+  if (sevThrough.length > 0) {
+    out.push({
+      text: `Went through Severe areas: ${sevThrough.map(fmt).join(", ")} - there was no other way`,
+      honoured: false,
+    });
+  } else {
+    out.push({
+      text:
+        sevEnd.length > 0
+          ? `Avoided every Severe area, except ${names(sevEnd)} where the trip starts or ends`
+          : "Avoided every Severe area",
+      honoured: true,
+    });
+  }
+
+  if (lowThrough.length > 0) {
+    const t = route.areaTradeoff;
+    const why =
+      t && t.avoidAllExtraPercent !== null
+        ? `staying out of all of them would make the trip ${t.avoidAllExtraPercent}% longer than Fastest (limit ${t.limitPercent}%)`
+        : "no route stays out of all of them";
+    out.push({ text: `Went through ${lowThrough.map(fmt).join(", ")} - ${why}`, honoured: false });
+  } else {
+    out.push({
+      text:
+        lowEnd.length > 0
+          ? `Avoided every High and Elevated area, except ${names(lowEnd)} where the trip starts or ends`
+          : "Avoided every High and Elevated area",
+      honoured: true,
+    });
+  }
+  return out;
+}
+
 export function describeRoute(route: DescribableRoute, minutes: string): RouteDescription {
-  const bestEffort = route.label.endsWith("best effort");
   const choices: RouteDescription["choices"] = [];
 
   if (route.customWaypoints) {
@@ -47,13 +105,8 @@ export function describeRoute(route: DescribableRoute, minutes: string): RouteDe
 
   if (route.profile === "fastest") {
     choices.push({ text: "Did not avoid dangerous areas", honoured: false });
-  } else if (bestEffort || route.metersInFlaggedAreas > 0) {
-    choices.push({
-      text: `Could not fully avoid dangerous areas (${(route.metersInFlaggedAreas / MI).toFixed(1)} mi inside)`,
-      honoured: false,
-    });
   } else {
-    choices.push({ text: "Avoided all flagged dangerous areas", honoured: true });
+    choices.push(...areaChoices(route));
   }
 
   if (route.profile === "safest") {
