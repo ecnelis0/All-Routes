@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Map as MlMap, setWorkerUrl, type GeoJSONSource } from "maplibre-gl";
+import { Map as MlMap, Marker, setWorkerUrl, type GeoJSONSource } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import {
   buildCameraPath,
@@ -146,9 +146,45 @@ export default function Route3DTour({
   const [showPlaces, setShowPlaces] = useState(false);
   /** A place is "here" from a little before it comes up until just after. */
   const PLACE_WINDOW_METERS = 350;
+  // A pin the rider clicked wins over whatever the tour is passing.
+  const [pickedPlaceId, setPickedPlaceId] = useState<string | null>(null);
   const placeHere = showPlaces
-    ? (places ?? []).find((p) => metersDone >= p.along - PLACE_WINDOW_METERS && metersDone <= p.along + PLACE_WINDOW_METERS)
+    ? ((places ?? []).find((p) => p.id === pickedPlaceId) ??
+      (places ?? []).find((p) => metersDone >= p.along - PLACE_WINDOW_METERS && metersDone <= p.along + PLACE_WINDOW_METERS))
     : undefined;
+
+  // Photo pins in the 3D scene - only while "Places" is on. MapLibre DOM
+  // markers, so they stay pinned to the ground as the camera flies.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready || !showPlaces || !places?.length) return;
+    const markers = places.map((pl) => {
+      const el = document.createElement("button");
+      el.type = "button";
+      el.title = pl.title;
+      el.setAttribute("aria-label", `About ${pl.title}`);
+      el.dataset.testid = "tour-place-pin";
+      el.className =
+        "block h-10 w-10 overflow-hidden rounded-full border-2 border-white bg-white text-lg leading-9 shadow-lg ring-1 ring-slate-400";
+      if (pl.image) {
+        const img = document.createElement("img");
+        img.src = pl.image;
+        img.alt = "";
+        img.className = "h-full w-full object-cover";
+        el.appendChild(img);
+      } else {
+        el.textContent = pl.emoji;
+      }
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();
+        setPickedPlaceId(pl.id);
+      });
+      return new Marker({ element: el }).setLngLat([pl.lng, pl.lat]).addTo(map);
+    });
+    return () => {
+      for (const m of markers) m.remove();
+    };
+  }, [ready, showPlaces, places]);
   const elevationProfile = useMemo(
     () => (pathElevations ? buildElevationProfile(path, pathElevations) : null),
     [path, pathElevations]
@@ -713,6 +749,15 @@ export default function Route3DTour({
           ) : placeHere ? (
             <div key={placeHere.id} className="rounded-xl bg-slate-950/85 p-3 shadow-2xl backdrop-blur">
               <PlaceCard place={placeHere} dark />
+              {pickedPlaceId === placeHere.id && (
+                <button
+                  type="button"
+                  onClick={() => setPickedPlaceId(null)}
+                  className="mt-2 text-[11px] text-slate-300 underline"
+                >
+                  Back to the tour
+                </button>
+              )}
             </div>
           ) : (
             <p className="rounded-lg bg-slate-950/70 px-3 py-1.5 text-[11px] text-slate-200">
