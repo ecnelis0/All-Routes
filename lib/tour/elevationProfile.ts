@@ -27,12 +27,29 @@ export interface ElevationSample {
   elevation: number;
   /** Grade right here, percent; positive = uphill. */
   gradePercent: number;
+  /** The same slope as an angle, degrees; positive = uphill. */
+  gradeDegrees: number;
+  /** Net elevation change over the next AHEAD_METERS of the route (shorter near the end). */
+  aheadChange: number;
+  /**
+   * Climbed and dropped within that stretch. Net change alone hides bumps:
+   * a road that rises 4 ft and falls 4 ft read as "0 ft" ahead.
+   */
+  aheadUp: number;
+  aheadDown: number;
+  aheadMeters: number;
   gained: number;
   dropped: number;
 }
 
 /** Grade is measured over this much road either side, not across one vertex. */
 const GRADE_WINDOW_METERS = 20;
+/** "What's coming": elevation change over this much road ahead (~0.1 mi). */
+export const AHEAD_METERS = 160;
+
+export function percentToDegrees(percent: number): number {
+  return (Math.atan(percent / 100) * 180) / Math.PI;
+}
 
 export function buildElevationProfile(path: LatLng[], elevations: number[]): ElevationProfile | null {
   if (path.length < 2 || elevations.length !== path.length) return null;
@@ -71,15 +88,32 @@ export function elevationAt(p: ElevationProfile, meters: number): number {
   return p.elev[i] + (p.elev[j] - p.elev[i]) * t;
 }
 
+function gainedAt(p: ElevationProfile, meters: number): [number, number] {
+  const [i, t] = locate(p, meters);
+  const j = Math.min(i + 1, p.elev.length - 1);
+  const d = p.elev[j] - p.elev[i];
+  return [p.gainTo[i] + Math.max(0, d) * t, p.lossTo[i] + Math.max(0, -d) * t];
+}
+
 export function sampleElevation(p: ElevationProfile, meters: number): ElevationSample {
   const [i, t] = locate(p, meters);
   const j = Math.min(i + 1, p.elev.length - 1);
   const d = p.elev[j] - p.elev[i];
   const a = Math.max(0, meters - GRADE_WINDOW_METERS);
   const b = Math.min(p.totalMeters, meters + GRADE_WINDOW_METERS);
+  const here = elevationAt(p, meters);
+  const gradePercent = b > a ? ((elevationAt(p, b) - elevationAt(p, a)) / (b - a)) * 100 : 0;
+  const aheadTo = Math.min(p.totalMeters, meters + AHEAD_METERS);
+  const [upNow, downNow] = gainedAt(p, meters);
+  const [upThen, downThen] = gainedAt(p, aheadTo);
   return {
-    elevation: elevationAt(p, meters),
-    gradePercent: b > a ? ((elevationAt(p, b) - elevationAt(p, a)) / (b - a)) * 100 : 0,
+    elevation: here,
+    aheadUp: upThen - upNow,
+    aheadDown: downThen - downNow,
+    gradePercent,
+    gradeDegrees: percentToDegrees(gradePercent),
+    aheadChange: elevationAt(p, aheadTo) - here,
+    aheadMeters: aheadTo - meters,
     // Partway along a segment, count the part of its climb already ridden.
     gained: p.gainTo[i] + Math.max(0, d) * t,
     dropped: p.lossTo[i] + Math.max(0, -d) * t,

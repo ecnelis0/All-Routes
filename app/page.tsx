@@ -18,6 +18,8 @@ import { DEMO_CITY } from "@/lib/mockData";
 import { buildManeuvers, formatDistance } from "@/lib/nav/instructions";
 import { describeRoute } from "@/lib/ui/routeDescription";
 import { rideMinutes, rideSeconds, type TimedRoute } from "@/lib/ui/rideTime";
+import { useTestMode } from "@/lib/ui/useTestMode";
+import { percentToDegrees } from "@/lib/tour/elevationProfile";
 import { insertWaypoint } from "@/lib/ui/geometry";
 import { RouteChoiceList } from "@/components/RouteChoices";
 import RouteCompare from "@/components/RouteCompare";
@@ -117,6 +119,7 @@ export default function Home() {
   const [fewerSignals, setFewerSignals] = useState(false);
   const [tourOpen, setTourOpen] = useState(false);
   const [navSource, setNavSource] = useState<"gps" | "simulate" | null>(null);
+  const testMode = useTestMode();
   /** Routes the rider took off the map. Reset by every new search. */
   const [hiddenRoutes, setHiddenRoutes] = useState<RouteKey[]>([]);
   const [routePopup, setRoutePopup] = useState<RoutePopup | null>(null);
@@ -939,7 +942,7 @@ export default function Home() {
                   <span
                     className={`font-medium ${activeRoute.maxGradePercent >= 12 ? "text-red-600" : ""}`}
                   >
-                    {activeRoute.maxGradePercent}%
+                    {activeRoute.maxGradePercent}% ({percentToDegrees(activeRoute.maxGradePercent).toFixed(1)}°)
                   </span>
                 </div>
                 <div className="flex justify-between">
@@ -947,7 +950,7 @@ export default function Home() {
                   <span
                     className={`font-medium ${activeRoute.maxDownGradePercent >= 12 ? "text-red-600" : ""}`}
                   >
-                    {activeRoute.maxDownGradePercent}%
+                    {activeRoute.maxDownGradePercent}% ({percentToDegrees(activeRoute.maxDownGradePercent).toFixed(1)}°)
                   </span>
                 </div>
                 <div className="flex justify-between">
@@ -1105,20 +1108,6 @@ export default function Home() {
             <h2 className="text-xs font-semibold uppercase tracking-wide text-black">
               Route overview
             </h2>
-            {origin && destination && (
-              <SaveRouteButton
-                // A different route starts unsaved.
-                key={`${activeRoute.label}-${activeRoute.distanceMeters}-${activeRoute.path.length}`}
-                defaultName={`${shortPlace(originText)} → ${shortPlace(destinationText)} · ${activeRoute.label.replace(/ · best effort$/, "")}`}
-                build={() => ({
-                  from: { label: originText, point: origin },
-                  to: { label: destinationText, point: destination },
-                  settings: { avoidElevation, fewerSignals },
-                  source: "route",
-                  route: activeRoute,
-                })}
-              />
-            )}
             <ol className="flex flex-col gap-1.5 text-xs text-black" data-testid="turn-list">
               {buildManeuvers(activeRoute.path, activeRoute.streetSpans).map((m, i, all) => {
                 const leg = (all[i + 1]?.atMeters ?? m.atMeters) - m.atMeters;
@@ -1138,14 +1127,30 @@ export default function Home() {
               >
                 Start navigation
               </button>
-              <button
-                type="button"
-                onClick={() => setNavSource("simulate")}
-                className="rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-black hover:bg-slate-50"
-              >
-                Simulate ride
-              </button>
+              {testMode && (
+                <button
+                  type="button"
+                  onClick={() => setNavSource("simulate")}
+                  className="rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-black hover:bg-slate-50"
+                >
+                  Simulate ride
+                </button>
+              )}
             </div>
+            {origin && destination && (
+              <SaveRouteButton
+                // A different route starts unsaved.
+                key={`${activeRoute.label}-${activeRoute.distanceMeters}-${activeRoute.path.length}`}
+                defaultName={`${shortPlace(originText)} → ${shortPlace(destinationText)} · ${activeRoute.label.replace(/ · best effort$/, "")}`}
+                build={() => ({
+                  from: { label: originText, point: origin },
+                  to: { label: destinationText, point: destination },
+                  settings: { avoidElevation, fewerSignals },
+                  source: "route",
+                  route: activeRoute,
+                })}
+              />
+            )}
             {activeRoute.streets.length === 0 && (
               <p className="text-xs text-black/60">
                 This route runs mostly on unnamed paths and connectors.

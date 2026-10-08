@@ -37,6 +37,8 @@ type Better = "lower" | "higher";
 const MI = 1609.34;
 const FT = 3.281;
 const ft = (m: number) => Math.round(Math.round(m) * FT);
+/** Slope as an angle, one decimal - "16.5% (9.4°)". */
+const deg = (percent: number) => ((Math.atan(percent / 100) * 180) / Math.PI).toFixed(1);
 
 const ROWS: {
   label: string;
@@ -63,8 +65,8 @@ const ROWS: {
     format: (v) => `${ft(v)} ft`,
     better: "lower",
   },
-  { label: "Steepest climb", value: (r) => r.maxGradePercent, format: (v) => `${v}%`, better: "lower" },
-  { label: "Steepest descent", value: (r) => r.maxDownGradePercent, format: (v) => `${v}%`, better: "lower" },
+  { label: "Steepest climb", value: (r) => r.maxGradePercent, format: (v) => `${v}% (${deg(v)}°)`, better: "lower" },
+  { label: "Steepest descent", value: (r) => r.maxDownGradePercent, format: (v) => `${v}% (${deg(v)}°)`, better: "lower" },
   {
     label: "Inside flagged areas",
     value: (r) => r.metersInFlaggedAreas,

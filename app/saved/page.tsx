@@ -12,10 +12,11 @@ import { emojiFor } from "@/lib/interests/catalog";
 import { buildManeuvers, formatDistance } from "@/lib/nav/instructions";
 import { deleteSaved, renameSaved, shortPlace, type SavedRoute } from "@/lib/saved/store";
 import { useSavedRoutes } from "@/lib/saved/useSavedRoutes";
-import { buildElevationProfile } from "@/lib/tour/elevationProfile";
+import { buildElevationProfile, percentToDegrees } from "@/lib/tour/elevationProfile";
 import { compareRoutes } from "@/lib/ui/compareRoutes";
 import { describeRoute } from "@/lib/ui/routeDescription";
 import { rideMinutes } from "@/lib/ui/rideTime";
+import { useTestMode } from "@/lib/ui/useTestMode";
 
 const Route3DTour = dynamic(() => import("@/components/Route3DTour"), { ssr: false });
 const NavigationView = dynamic(() => import("@/components/NavigationView"), { ssr: false });
@@ -221,6 +222,7 @@ function Detail({
   const [renaming, setRenaming] = useState(false);
   const [name, setName] = useState(s.name);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const testMode = useTestMode();
   const r = s.route;
   const description = describe(s);
   const rows = useMemo(() => compareRoutes([r]), [r]);
@@ -268,17 +270,19 @@ function Detail({
         <button
           type="button"
           onClick={() => onNavigate("gps")}
-          className="rounded-md bg-emerald-700 px-3 py-2 text-sm font-semibold text-white"
+          className={`rounded-md bg-emerald-700 px-3 py-2 text-sm font-semibold text-white ${testMode ? "" : "col-span-2"}`}
         >
           Start navigation
         </button>
-        <button
-          type="button"
-          onClick={() => onNavigate("simulate")}
-          className="rounded-md border border-slate-300 px-3 py-2 text-sm font-medium hover:bg-slate-50"
-        >
-          Simulate ride
-        </button>
+        {testMode && (
+          <button
+            type="button"
+            onClick={() => onNavigate("simulate")}
+            className="rounded-md border border-slate-300 px-3 py-2 text-sm font-medium hover:bg-slate-50"
+          >
+            Simulate ride
+          </button>
+        )}
         <button
           type="button"
           onClick={onTour}
@@ -328,7 +332,8 @@ function Detail({
           <ProfileChart profile={profile} width={350} height={70} fill="rgba(59,130,246,0.5)" />
           <p className="mt-0.5 text-black/60">
             ▲ {ft(r.elevationGainMeters)} ft climbed · ▼ {ft(r.elevationLossMeters)} ft dropped · steepest{" "}
-            {r.maxGradePercent}% up / {r.maxDownGradePercent}% down
+            {r.maxGradePercent}% ({percentToDegrees(r.maxGradePercent).toFixed(1)}°) up / {r.maxDownGradePercent}% (
+            {percentToDegrees(r.maxDownGradePercent).toFixed(1)}°) down
           </p>
         </section>
       )}

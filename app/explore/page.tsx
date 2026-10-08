@@ -12,6 +12,7 @@ import { emojiFor, INTERESTS, type InterestId, type InterestRide } from "@/lib/i
 import type { RouteSummary } from "@/lib/routing/service";
 import { describeRoute } from "@/lib/ui/routeDescription";
 import { rideMinutes } from "@/lib/ui/rideTime";
+import { useTestMode } from "@/lib/ui/useTestMode";
 import type { LatLng } from "@/lib/types";
 
 const NavigationView = dynamic(() => import("@/components/NavigationView"), { ssr: false });
@@ -43,6 +44,7 @@ export default function ExplorePage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [navSource, setNavSource] = useState<"gps" | "simulate" | null>(null);
+  const testMode = useTestMode();
   const requestIdRef = useRef(0);
 
   function toggle(id: InterestId) {
@@ -226,6 +228,24 @@ export default function ExplorePage() {
               </p>
             </div>
 
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setNavSource("gps")}
+                className="flex-1 rounded-md bg-emerald-700 px-3 py-2 text-sm font-semibold text-white"
+              >
+                Start navigation
+              </button>
+              {testMode && (
+                <button
+                  type="button"
+                  onClick={() => setNavSource("simulate")}
+                  className="rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-medium hover:bg-slate-50"
+                >
+                  Simulate ride
+                </button>
+              )}
+            </div>
             {origin && destination && (
               <SaveRouteButton
                 key={`${ride.style}-${ride.route.distanceMeters}`}
@@ -240,22 +260,6 @@ export default function ExplorePage() {
                 })}
               />
             )}
-            <div className="flex gap-2">
-              <button
-                type="button"
-                onClick={() => setNavSource("gps")}
-                className="flex-1 rounded-md bg-emerald-700 px-3 py-2 text-sm font-semibold text-white"
-              >
-                Start navigation
-              </button>
-              <button
-                type="button"
-                onClick={() => setNavSource("simulate")}
-                className="rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-medium hover:bg-slate-50"
-              >
-                Simulate ride
-              </button>
-            </div>
           </section>
         )}
       </aside>

@@ -43,13 +43,23 @@ export default function ElevationPanel({ profile, meters }: { profile: Elevation
       className="pointer-events-none absolute bottom-28 left-4 w-[17rem] rounded-lg border border-white/10 bg-slate-950/75 px-3 py-2 text-white shadow-xl backdrop-blur"
       data-testid="elevation-panel"
     >
+      {/* The slope and the change coming up are what a rider feels; the
+          height above sea level is context, so it is the smallest line. */}
       <div className="flex items-baseline justify-between">
-        <span className="text-lg font-semibold tabular-nums" data-testid="elevation-now">
-          {Math.round(s.elevation * FT)} ft
-        </span>
-        <span className="text-sm font-semibold tabular-nums" style={{ color: gradeColor(g) }} data-testid="elevation-grade">
+        <span className="text-xl font-bold tabular-nums" style={{ color: gradeColor(g) }} data-testid="elevation-grade">
           {arrow} {Math.abs(g).toFixed(1)}%
+          <span className="ml-1 text-sm font-semibold">({Math.abs(s.gradeDegrees).toFixed(1)}°)</span>
         </span>
+        <span className="text-[11px] text-slate-400">slope here</span>
+      </div>
+      <div className="flex items-baseline justify-between text-sm tabular-nums" data-testid="elevation-ahead">
+        <span className="font-semibold">
+          ▲ {ft(s.aheadUp)} ft · ▼ {ft(s.aheadDown)} ft
+        </span>
+        <span className="text-[11px] text-slate-400">next {(s.aheadMeters / 1609.34).toFixed(1)} mi</span>
+      </div>
+      <div className="text-[11px] tabular-nums text-slate-400" data-testid="elevation-now">
+        Elevation {Math.round(s.elevation * FT)} ft
       </div>
       <div className="mt-1">
         <ProfileChart profile={profile} width={W} height={H} progressMeters={meters} />
