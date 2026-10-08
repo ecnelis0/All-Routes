@@ -32,6 +32,8 @@ export interface DescribableRoute {
   customWaypoints?: unknown[];
   /** Suggested edits the rider accepted - each may knowingly break a setting. */
   acceptedSuggestions?: string[];
+  /** "For you" rides: places visited for the rider's interests. */
+  interestStops?: { name: string; emoji: string }[];
 }
 
 export interface RouteDescription {
@@ -115,7 +117,16 @@ function areaChoices(route: DescribableRoute): RouteDescription["choices"] {
 export function describeRoute(route: DescribableRoute, minutes: string): RouteDescription {
   const choices: RouteDescription["choices"] = [];
 
-  if (route.customWaypoints) {
+  if (route.interestStops) {
+    choices.push(
+      route.interestStops.length > 0
+        ? {
+            text: `Visits places you like: ${route.interestStops.map((p) => `${p.emoji} ${p.name}`).join(", ")}`,
+            honoured: true,
+          }
+        : { text: "Nothing you like was close enough to be worth the detour", honoured: false }
+    );
+  } else if (route.customWaypoints) {
     const n = route.customWaypoints.length;
     choices.push({
       text: n > 0 ? `Your edited route · passes ${n} stop${n === 1 ? "" : "s"} you chose` : "Your edited route",

@@ -157,11 +157,7 @@ function List({ saved, onOpen }: { saved: SavedRoute[]; onOpen: (id: string) => 
         <div className="rounded-lg border border-dashed border-slate-300 p-4 text-sm text-black/70">
           Nothing saved yet. Plan a route on{" "}
           <Link href="/" className="font-semibold text-blue-700 underline">
-            Safety routing
-          </Link>{" "}
-          or{" "}
-          <Link href="/explore" className="font-semibold text-blue-700 underline">
-            Explore
+            Plan a ride
           </Link>
           , confirm it, and press <span className="font-semibold">Save route</span>.
         </div>
@@ -183,7 +179,7 @@ function List({ saved, onOpen }: { saved: SavedRoute[]; onOpen: (id: string) => 
                         s.source === "explore" ? "bg-teal-100 text-teal-800" : "bg-blue-100 text-blue-800"
                       }`}
                     >
-                      {s.source === "explore" ? "Explore" : "Safety"}
+                      {s.source === "explore" ? "For you" : "Safety"}
                     </span>
                   </span>
                   <span className="text-xs text-black/60">
@@ -262,7 +258,7 @@ function Detail({
       <p className="-mt-2 text-xs text-black/60">
         {s.from.label} → {s.to.label}
         <br />
-        Saved {when(s.savedAt)} · {s.source === "explore" ? "Explore ride" : r.label} · Avoid hills{" "}
+        Saved {when(s.savedAt)} · {s.source === "explore" ? `For you · ${r.label}` : r.label} · Avoid hills{" "}
         {s.settings.avoidElevation ? "on" : "off"} · Fewer lights {s.settings.fewerSignals ? "on" : "off"}
       </p>
 

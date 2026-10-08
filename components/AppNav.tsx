@@ -12,8 +12,7 @@ export default function AppNav() {
   if (pathname.startsWith("/render")) return null;
 
   const tabs = [
-    { href: "/", label: "Safety routing" },
-    { href: "/explore", label: "Explore" },
+    { href: "/", label: "Plan a ride" },
     { href: "/saved", label: saved.length > 0 ? `Saved (${saved.length})` : "Saved" },
   ];
   return (

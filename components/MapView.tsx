@@ -51,7 +51,7 @@ export interface MapSuggestion {
 const SUGGESTION_COLOR = "#ea580c";
 
 /** The three standard options plus the rider's own edited route. */
-export type MapRouteKind = SelectedRouteDisplay["kind"] | "custom";
+export type MapRouteKind = SelectedRouteDisplay["kind"] | "custom" | "interest";
 
 export interface MapRoute {
   kind: MapRouteKind;
@@ -194,6 +194,8 @@ export const ROUTE_COLOR_BY_KIND: Record<MapRouteKind, string> = {
   safest: "#16a34a",
   // The rider's own route - distinct from every stock option.
   custom: "#7c3aed",
+  // "For you": shaped by the rider's interests.
+  interest: "#0d9488",
 };
 
 function toLatLng(e: google.maps.MapMouseEvent): LatLng | null {

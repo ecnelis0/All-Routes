@@ -4,8 +4,9 @@ import { useJsApiLoader } from "@react-google-maps/api";
 import dynamic from "next/dynamic";
 import { useEffect, useRef, useState } from "react";
 import AddressSearch from "@/components/AddressSearch";
-import MapView, { type MapRoute, type MapRouteKind, type RoutePopup } from "@/components/MapView";
+import MapView, { type MapPlace, type MapRoute, type MapRouteKind, type RoutePopup } from "@/components/MapView";
 import type { SuggestedEdit } from "@/lib/routing/suggest";
+import { emojiFor, INTERESTS, type InterestId, type InterestRide } from "@/lib/interests/catalog";
 // Loaded lazily: maplibre-gl is ~900KB and only needed when a tour opens.
 const Route3DTour = dynamic(() => import("@/components/Route3DTour"), { ssr: false });
 const NavigationView = dynamic(() => import("@/components/NavigationView"), { ssr: false });
@@ -128,6 +129,13 @@ export default function Home() {
    * toured, navigated or edited. "Show all routes" goes back.
    */
   const [focused, setFocused] = useState(false);
+  // "For you": interests shape an extra route alongside the three options,
+  // planned with the same hill/light settings and safety rules.
+  const [interests, setInterests] = useState<InterestId[]>([]);
+  const [interestRides, setInterestRides] = useState<(InterestRide & { route: RouteSummary })[] | null>(null);
+  const [interestStyle, setInterestStyle] = useState(0);
+  const [interestBusy, setInterestBusy] = useState(false);
+  const interestRequestIdRef = useRef(0);
   const [compareOpen, setCompareOpen] = useState(false);
   /** The rider's saved, edited route ("My route"). */
   const [customRoute, setCustomRoute] = useState<RouteSummary | null>(null);
@@ -198,6 +206,9 @@ export default function Home() {
     setCompareOpen(false);
     setCustomRoute(null);
     exitEditing();
+    interestRequestIdRef.current++;
+    setInterestRides(null);
+    setInterestBusy(false);
     setComputingSafer(false);
     setRoutingError(null);
   }
@@ -223,6 +234,7 @@ export default function Home() {
     setFocused(false);
     setCustomRoute(null);
     exitEditing();
+    void planInterests(from, to, interests, hills, lights);
     setSelectedRouteKind("fastest");
     setConfirmed(false);
     setRoutingError(null);
@@ -305,7 +317,43 @@ export default function Home() {
     }
   }
 
+  async function planInterests(from: LatLng, to: LatLng, list: InterestId[], hills: boolean, lights: boolean) {
+    const id = ++interestRequestIdRef.current;
+    setInterestRides(null);
+    if (list.length === 0) {
+      setInterestBusy(false);
+      return;
+    }
+    setInterestBusy(true);
+    try {
+      const res = await fetch("/api/interests", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ origin: from, destination: to, interests: list, avoidElevation: hills, fewerSignals: lights }),
+      });
+      const json = (await res.json()) as { rides?: (InterestRide & { route: RouteSummary })[] };
+      if (id !== interestRequestIdRef.current) return;
+      setInterestRides(res.ok ? (json.rides ?? []) : []);
+      setInterestStyle(0);
+    } catch {
+      if (id === interestRequestIdRef.current) setInterestRides([]);
+    } finally {
+      if (id === interestRequestIdRef.current) setInterestBusy(false);
+    }
+  }
+
+  function toggleInterest(id: InterestId) {
+    const next = interests.includes(id) ? interests.filter((x) => x !== id) : [...interests, id];
+    setInterests(next);
+    if (selectedRouteKind === "interest") {
+      setSelectedRouteKind("fastest");
+      setFocused(false);
+    }
+    if (origin && destination) void planInterests(origin, destination, next, avoidElevation, fewerSignals);
+  }
+
   function routeFor(kind: RouteKey): RouteSummary | null {
+    if (kind === "interest") return interestRides?.[interestStyle]?.route ?? null;
     return kind === "custom" ? customRoute : (routes[kind] ?? null);
   }
 
@@ -505,10 +553,33 @@ export default function Home() {
   // While editing, the route on screen (and in the sidebar) is the edited
   // draft - or the original until the first stop is added.
   const activeRoute = editing ? (draftRoute ?? editOriginal) : selectedRoute;
+  const interestRide = interestRides?.[interestStyle] ?? null;
+  const interestLabel = INTERESTS.filter((i) => interests.includes(i.id))
+    .map((i) => i.emoji)
+    .join(" ");
   const tabs: { kind: RouteKey; label: string; hint: string }[] = [
     ...ROUTE_TABS,
+    ...(interests.length > 0
+      ? [
+          {
+            kind: "interest" as const,
+            label: `For you ${interestLabel}`,
+            hint: interestRide
+              ? `${interestRide.styleLabel} · ${interestRide.stops.length} stop${interestRide.stops.length === 1 ? "" : "s"} you'd like`
+              : "Places you like, on the way",
+          },
+        ]
+      : []),
     ...(customRoute ? [{ kind: "custom" as const, label: "My route", hint: "Your edited route" }] : []),
   ];
+  // Pins for the "For you" ride when it is the one being looked at.
+  const showRidePins = !editing && selectedRouteKind === "interest" && interestRide;
+  const places: MapPlace[] = showRidePins
+    ? [
+        ...interestRide.stops.map((p, i) => ({ id: p.id, name: p.name, emoji: emojiFor(p.category), position: p, stopNumber: i + 1 })),
+        ...interestRide.along.map((p) => ({ id: p.id, name: p.name, emoji: emojiFor(p.category), position: p })),
+      ]
+    : [];
   const mapRoutes: MapRoute[] = editing
     ? activeRoute
       ? [{ kind: "custom", path: activeRoute.path, description: describe(activeRoute) }]
@@ -600,6 +671,33 @@ export default function Home() {
               {showNeighborhoodView ? "Hide" : "Show dangerous areas"}
             </span>
           </button>
+          <div className="flex flex-col gap-1.5" data-testid="interests">
+            <span className="text-xs font-semibold uppercase tracking-wide text-black">What do you like?</span>
+            <div className="flex flex-wrap gap-1">
+              {INTERESTS.map((i) => {
+                const on = interests.includes(i.id);
+                return (
+                  <button
+                    key={i.id}
+                    type="button"
+                    onClick={() => toggleInterest(i.id)}
+                    aria-pressed={on}
+                    className={`rounded-full border px-2.5 py-0.5 text-xs ${
+                      on ? "border-teal-600 bg-teal-600 text-white" : "border-slate-300 bg-white text-black hover:bg-slate-50"
+                    }`}
+                  >
+                    {i.emoji} {i.label}
+                  </button>
+                );
+              })}
+            </div>
+            {interests.length > 0 && (
+              <span className="text-[10px] text-black/55">
+                Adds a &ldquo;For you&rdquo; route that passes places you like - same safety rules, same hill
+                and light settings.
+              </span>
+            )}
+          </div>
           {showNeighborhoodView && (
             <div className="flex flex-col gap-1.5">
               <p className="text-[11px] leading-snug text-black">
@@ -666,7 +764,7 @@ export default function Home() {
                     } disabled:cursor-not-allowed disabled:opacity-50`}
                   >
                     <span className="flex flex-col">
-                      <span className="font-medium">{route?.label ?? tab.label}</span>
+                      <span className="font-medium">{tab.kind === "interest" ? tab.label : (route?.label ?? tab.label)}</span>
                       <span className="text-[10px] text-black/55">
                         {route && hiddenRoutes.includes(tab.kind) ? "Removed from map \u00b7 click to show" : tab.hint}
                       </span>
@@ -674,7 +772,7 @@ export default function Home() {
                     <span className="text-[11px] text-black">
                       {route
                         ? `${metersToMiles(route.distanceMeters)} mi \u00b7 ~${estimateMinutes(route)} min`
-                        : computingSafer
+                        : computingSafer || (tab.kind === "interest" && interestBusy)
                           ? "Computing\u2026"
                           : "\u2014"}
                     </span>
@@ -894,6 +992,23 @@ export default function Home() {
 
             {activeRoute && (
               <div className="flex flex-col gap-1 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-black">
+                {selectedRouteKind === "interest" && !editing && interestRides && interestRides.length > 1 && (
+                  <div className="mb-1 flex gap-1" role="group" aria-label="Ride style">
+                    {interestRides.map((r, i) => (
+                      <button
+                        key={r.style}
+                        type="button"
+                        onClick={() => setInterestStyle(i)}
+                        aria-pressed={interestStyle === i}
+                        className={`flex-1 rounded border px-2 py-1 text-[11px] ${
+                          interestStyle === i ? "border-teal-600 bg-teal-50 font-semibold" : "border-slate-300 bg-white"
+                        }`}
+                      >
+                        {r.styleLabel} · {r.stops.length} stop{r.stops.length === 1 ? "" : "s"} · +{r.extraPercent}%
+                      </button>
+                    ))}
+                  </div>
+                )}
                 <div className="mb-1 border-b border-slate-200 pb-1.5" data-testid="route-details-choices">
                   <span className="font-semibold">{activeRoute.label}</span>
                   <RouteChoiceList description={describe(activeRoute)} />
@@ -1146,8 +1261,9 @@ export default function Home() {
                   from: { label: originText, point: origin },
                   to: { label: destinationText, point: destination },
                   settings: { avoidElevation, fewerSignals },
-                  source: "route",
+                  source: selectedRouteKind === "interest" ? "explore" : "route",
                   route: activeRoute,
+                  ...(selectedRouteKind === "interest" && interestRide ? { places: interestRide.stops } : {}),
                 })}
               />
             )}
@@ -1199,6 +1315,7 @@ export default function Home() {
           openSuggestionId={openSuggestionId}
           onOpenSuggestion={setOpenSuggestionId}
           onUseSuggestion={applySuggestion}
+          places={places}
           dangerZones={showNeighborhoodView ? (data?.dangerZones ?? []) : []}
           dangerousNeighborhoods={showNeighborhoodView ? SF_DANGEROUS_NEIGHBORHOODS : []}
         />

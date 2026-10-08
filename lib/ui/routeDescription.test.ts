@@ -83,6 +83,21 @@ describe("describeRoute on an edited route", () => {
   });
 });
 
+describe("For you rides", () => {
+  it("names the places visited, not 'stops you chose'", () => {
+    const r = {
+      ...base,
+      customWaypoints: [{}, {}],
+      interestStops: [
+        { name: "Marshall's Beach", emoji: "🏖️" },
+        { name: "Little Sweet", emoji: "🧋" },
+      ],
+    };
+    expect(texts(r)[0]).toBe("Visits places you like: 🏖️ Marshall's Beach, 🧋 Little Sweet");
+    expect(texts(r).join(" ")).not.toContain("stops you chose");
+  });
+});
+
 describe("crash hotspots", () => {
   it("says whether the safer route kept out of crash hotspots, and why not", () => {
     const clear = { ...base, crashHotspots: { entered: 0, meters: 0 } };

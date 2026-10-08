@@ -567,6 +567,8 @@ export interface RouteSummary {
    * "Avoid hills" is on - so the route has to say so.
    */
   acceptedSuggestions?: string[];
+  /** Set on a "For you" ride: the places it was routed through for the rider's interests. */
+  interestStops?: { name: string; emoji: string }[];
 }
 
 /** Above this much extra distance versus the fastest route, say so plainly. */

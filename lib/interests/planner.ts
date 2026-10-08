@@ -26,7 +26,7 @@ import poiFile from "../data/sfPois.json";
  * about what it knows.
  */
 
-import { INTERESTS, type InterestId, type PlaceInterest, type Poi } from "./catalog";
+import { emojiFor, INTERESTS, type InterestId, type PlaceInterest, type Poi } from "./catalog";
 export { INTERESTS, type InterestId, type PlaceInterest, type Poi } from "./catalog";
 
 
@@ -211,7 +211,11 @@ export function planInterestRoutes(
     out.push({
       style,
       styleLabel: STYLE[style].label,
-      route: { ...route, label: `${STYLE[style].label} ${labels.join(" + ") || "ride"}` },
+      route: {
+        ...route,
+        label: `${STYLE[style].label} ${labels.join(" + ") || "ride"}`,
+        interestStops: stops.map((p) => ({ name: p.name, emoji: emojiFor(p.category) })),
+      },
       stops,
       along,
       extraPercent: Math.round((route.distanceMeters / Math.max(1, baseMeters) - 1) * 100),
