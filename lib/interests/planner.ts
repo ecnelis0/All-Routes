@@ -214,7 +214,7 @@ export function planInterestRoutes(
       route: {
         ...route,
         label: `${STYLE[style].label} ${labels.join(" + ") || "ride"}`,
-        interestStops: stops.map((p) => ({ name: p.name, emoji: emojiFor(p.category) })),
+        interestStops: stops.map((p) => ({ id: p.id, name: p.name, emoji: emojiFor(p.category), lat: p.lat, lng: p.lng })),
       },
       stops,
       along,

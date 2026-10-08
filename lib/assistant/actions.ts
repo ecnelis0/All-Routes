@@ -8,6 +8,7 @@ import type { LatLng } from "../types";
  * example, route through a Severe area: no action does that).
  */
 export type RouteOption = "fastest" | "balanced" | "safest" | "interest";
+export type ImproveGoal = "faster" | "flatter" | "safer" | "fewer-lights";
 
 export type AssistantAction =
   | { type: "set_trip"; from?: { label: string; point: LatLng }; to?: { label: string; point: LatLng } }
@@ -15,6 +16,10 @@ export type AssistantAction =
   | { type: "set_interests"; interests: InterestId[] }
   | { type: "choose_route"; option: RouteOption }
   | { type: "add_stop"; label: string; point: LatLng }
+  /** My route: drop stop N (1-based, in riding order). */
+  | { type: "remove_stop"; stop: number }
+  /** My route: apply the best suggested edit of this kind. */
+  | { type: "improve_route"; goal: ImproveGoal }
   | { type: "show_places"; on: boolean };
 
 /** What the assistant is told about the screen, so it can answer "why" questions. */
@@ -27,6 +32,12 @@ export interface AssistantContext {
   routes: string[];
   /** The route being looked at: its name and what it did (the ✓/✕ list). */
   selected: { label: string; facts: string[] } | null;
+  /**
+   * The rider's own route, once they confirmed one. From then on changes
+   * EDIT this route (its stops, its settings) instead of re-planning the
+   * options - the options were only ways to choose it.
+   */
+  myRoute: { label: string; stops: number; avoidsHills: boolean; fewerLights: boolean; summary: string } | null;
 }
 
 export interface ChatMessage {
@@ -55,6 +66,10 @@ export function describeActions(actions: AssistantAction[]): string[] {
         return `Showing ${{ fastest: "Fastest", balanced: "Safest", safest: "Safest + bike lanes", interest: "For you" }[a.option]}`;
       case "add_stop":
         return `Added stop: ${a.label.split(",")[0]}`;
+      case "remove_stop":
+        return `Removed stop ${a.stop}`;
+      case "improve_route":
+        return `Looking for a ${{ faster: "faster", flatter: "flatter", safer: "safer", "fewer-lights": "fewer-lights" }[a.goal]} change to your route`;
       case "show_places":
         return a.on ? "Showing places along the way" : "Hiding places";
     }

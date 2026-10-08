@@ -29,6 +29,11 @@ export function systemPrompt(ctx: AssistantContext): string {
     `- Interests available: ${INTERESTS.map((i) => `${i.id} (${i.label})`).join(", ")}.`,
     "- To make the route go somewhere specific ('via Ocean Beach', 'past the Ferry Building'), use add_stop.",
     "",
+    "The options and settings are ways to CHOOSE a route. Once the rider has confirmed one ('myRoute' below is not null),",
+    "it is THEIR route: requests change that route. Use add_stop / remove_stop for where it goes, set_settings to re-plan",
+    "it with hills/lights preferences (its stops are kept), and improve_route for 'make it faster / flatter / safer /",
+    "fewer lights'. Do not change the trip (set_trip) unless the rider asks for a different start or destination.",
+    "",
     "What is on screen now:",
     JSON.stringify(ctx, null, 1),
   ].join("\n");
@@ -101,6 +106,26 @@ export async function runAssistant(
           if (!hit) return { ok: false, error: `Could not find ${place} in San Francisco.` };
           actions.push({ type: "add_stop", ...hit });
           return { ok: true, found: hit.label };
+        },
+      }),
+      remove_stop: tool({
+        description: "Remove a stop from the rider's confirmed route (My route), by its number in riding order.",
+        inputSchema: z.object({ stop: z.number().int().min(1) }),
+        execute: async ({ stop }) => {
+          if (!ctx.myRoute) return { ok: false, error: "There is no confirmed route yet." };
+          if (stop > ctx.myRoute.stops) return { ok: false, error: `My route has ${ctx.myRoute.stops} stop(s).` };
+          actions.push({ type: "remove_stop", stop });
+          return { ok: true };
+        },
+      }),
+      improve_route: tool({
+        description:
+          "Improve the rider's confirmed route (My route) by applying the best suggested edit of one kind. The app reports the trade-off it found, or that none exists.",
+        inputSchema: z.object({ goal: z.enum(["faster", "flatter", "safer", "fewer-lights"]) }),
+        execute: async ({ goal }) => {
+          if (!ctx.myRoute) return { ok: false, error: "There is no confirmed route yet - confirm one first." };
+          actions.push({ type: "improve_route", goal });
+          return { ok: true, note: "The app will apply the best such edit and show its cost, or say none exists." };
         },
       }),
       show_places: tool({

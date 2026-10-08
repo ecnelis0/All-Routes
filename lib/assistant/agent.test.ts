@@ -45,6 +45,11 @@ const ctx: AssistantContext = {
   interests: [],
   routes: ["Fastest: 4.6 mi, ~45 min", "Safest: 5.2 mi, ~51 min"],
   selected: { label: "Fastest", facts: ["✕ Did not avoid hills"] },
+  myRoute: null,
+};
+const confirmed: AssistantContext = {
+  ...ctx,
+  myRoute: { label: "My route (Safest)", stops: 2, avoidsHills: false, fewerLights: false, summary: "5.2 mi, ~51 min" },
 };
 
 describe("route assistant", () => {
@@ -81,6 +86,41 @@ describe("route assistant", () => {
     const model = scripted([{ toolName: "set_interests", input: { interests: ["casinos"] } }], "Sorry.");
     const out = await runAssistant(model, [{ role: "user", content: "casinos please" }], ctx);
     expect(out.actions).toEqual([]);
+  });
+
+  it("edits the confirmed route: removes a stop, asks for a faster version", async () => {
+    const model = scripted(
+      [
+        { toolName: "remove_stop", input: { stop: 2 } },
+        { toolName: "improve_route", input: { goal: "faster" } },
+      ],
+      "Dropped stop 2 and looked for a faster way."
+    );
+    const out = await runAssistant(model, [{ role: "user", content: "drop the second stop and make it quicker" }], confirmed);
+    expect(out.actions).toEqual([
+      { type: "remove_stop", stop: 2 },
+      { type: "improve_route", goal: "faster" },
+    ]);
+  });
+
+  it("cannot edit 'my route' before one is confirmed, or remove a stop that is not there", async () => {
+    const before = await runAssistant(
+      scripted([{ toolName: "improve_route", input: { goal: "flatter" } }], "Confirm a route first."),
+      [{ role: "user", content: "make it flatter" }],
+      ctx
+    );
+    expect(before.actions).toEqual([]);
+    const missing = await runAssistant(
+      scripted([{ toolName: "remove_stop", input: { stop: 5 } }], "There is no stop 5."),
+      [{ role: "user", content: "remove stop 5" }],
+      confirmed
+    );
+    expect(missing.actions).toEqual([]);
+  });
+
+  it("is told that once confirmed, requests edit the rider's own route", () => {
+    expect(systemPrompt(confirmed)).toContain("it is THEIR route");
+    expect(systemPrompt(confirmed)).toContain("My route (Safest)");
   });
 
   it("is told the safety rules and what is on screen, so it explains instead of promising", () => {

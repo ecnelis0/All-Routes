@@ -568,7 +568,7 @@ export interface RouteSummary {
    */
   acceptedSuggestions?: string[];
   /** Set on a "For you" ride: the places it was routed through for the rider's interests. */
-  interestStops?: { name: string; emoji: string }[];
+  interestStops?: { id: string; name: string; emoji: string; lat: number; lng: number }[];
 }
 
 /** Above this much extra distance versus the fastest route, say so plainly. */

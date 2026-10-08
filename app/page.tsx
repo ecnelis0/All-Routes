@@ -233,18 +233,25 @@ export default function Home() {
     });
   }, []);
 
-  function resetRouteState() {
+  /**
+   * Clears the planned options. `clearMine` is false when only a filter
+   * changed: the options are re-planned, but the route the rider confirmed
+   * is theirs and stays - only a new start or destination replaces it.
+   */
+  function resetRouteState(clearMine = true) {
     routeRequestIdRef.current++; // invalidate any in-flight search
-    setTourOpen(false);
     setRoutes({});
-    setSelectedRouteKind("fastest");
-    setConfirmed(false);
     setHiddenRoutes([]);
     setRoutePopup(null);
-    setFocused(false);
     setCompareOpen(false);
-    setCustomRoute(null);
-    exitEditing();
+    if (clearMine) {
+      setTourOpen(false);
+      setSelectedRouteKind("fastest");
+      setConfirmed(false);
+      setFocused(false);
+      setCustomRoute(null);
+      exitEditing();
+    }
     interestRequestIdRef.current++;
     setInterestRides(null);
     setInterestBusy(false);
@@ -265,18 +272,21 @@ export default function Home() {
     to: LatLng,
     hills = avoidElevation,
     lights = fewerSignals,
-    list = interests
+    list = interests,
+    keepMine = false
   ) {
     const requestId = ++routeRequestIdRef.current;
     setRoutes({});
     setHiddenRoutes([]);
     setRoutePopup(null);
-    setFocused(false);
-    setCustomRoute(null);
-    exitEditing();
     void planInterests(from, to, list, hills, lights);
-    setSelectedRouteKind("fastest");
-    setConfirmed(false);
+    if (!keepMine) {
+      setFocused(false);
+      setCustomRoute(null);
+      exitEditing();
+      setSelectedRouteKind("fastest");
+      setConfirmed(false);
+    }
     setRoutingError(null);
     setComputingSafer(true);
 
@@ -352,8 +362,9 @@ export default function Home() {
     // the next render, so reading it inside startRouteSearch would re-plan
     // with the OLD setting.
     if (origin && destination) {
-      resetRouteState();
-      void startRouteSearch(origin, destination, next, fewerSignals);
+      const keep = customRoute !== null;
+      resetRouteState(!keep);
+      void startRouteSearch(origin, destination, next, fewerSignals, interests, keep);
     }
   }
 
@@ -361,8 +372,9 @@ export default function Home() {
     const next = !fewerSignals;
     setFewerSignals(next);
     if (origin && destination) {
-      resetRouteState();
-      void startRouteSearch(origin, destination, avoidElevation, next);
+      const keep = customRoute !== null;
+      resetRouteState(!keep);
+      void startRouteSearch(origin, destination, avoidElevation, next, interests, keep);
     }
   }
 
@@ -493,7 +505,84 @@ export default function Home() {
    * planners as the hand controls. Settings, trip and interests are
    * gathered first, so a request that changes several of them plans once.
    */
-  function applyAssistantActions(actions: AssistantAction[]) {
+  /**
+   * Once a route is confirmed, the assistant edits THAT route: its stops,
+   * its own hill/light settings, and "make it faster/flatter/..." through
+   * suggested edits. Returns notes for the chat ("Applied: ..." or "none").
+   */
+  async function editMineWithAssistant(mine: RouteSummary, actions: AssistantAction[]): Promise<string[]> {
+    const notes: string[] = [];
+    let stops = mine.customWaypoints ?? [];
+    let hills = mine.avoidedElevation;
+    let lights = mine.preferredFewerSignals;
+    let changed = false;
+    for (const a of actions) {
+      if (a.type === "set_settings") {
+        if (a.avoidHills !== undefined && a.avoidHills !== hills) {
+          hills = a.avoidHills;
+          changed = true;
+        }
+        if (a.fewerLights !== undefined && a.fewerLights !== lights) {
+          lights = a.fewerLights;
+          changed = true;
+        }
+      } else if (a.type === "add_stop") {
+        if (stops.length < MAX_STOPS) {
+          stops = insertWaypoint(stops, a.point, mine.path);
+          changed = true;
+        } else notes.push(`My route already has ${MAX_STOPS} stops - remove one first.`);
+      } else if (a.type === "remove_stop") {
+        stops = stops.filter((_, i) => i !== a.stop - 1);
+        changed = true;
+      }
+    }
+    let route: RouteSummary | null = mine;
+    if (changed) {
+      route = await replanMine(mine, stops, hills, lights);
+      if (!route) return [...notes, "Couldn't re-plan your route with that change."];
+    }
+    for (const a of actions) {
+      if (a.type !== "improve_route" || !route) continue;
+      const res = await fetch("/api/route/suggest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          origin,
+          destination,
+          waypoints: route.customWaypoints ?? [],
+          profile: route.profile,
+          avoidElevation: route.avoidedElevation,
+          fewerSignals: route.preferredFewerSignals,
+          accepted: route.acceptedSuggestions ?? [],
+          basePath: route.path,
+        }),
+      });
+      const json = (await res.json()) as { suggestions?: SuggestedEdit[] };
+      const best = (json.suggestions ?? []).find((x) => x.kind === a.goal);
+      if (best) {
+        route = { ...best.route, label: route.label, interestStops: route.interestStops };
+        notes.push(`Applied: ${best.headline}`);
+      } else {
+        notes.push(`No ${a.goal === "fewer-lights" ? "fewer-lights" : a.goal} change to your route was worth making.`);
+      }
+    }
+    if (route && route !== mine) {
+      setCustomRoute(route);
+      setSelectedRouteKind("custom");
+      setFocused(true);
+    }
+    return notes;
+  }
+
+  function applyAssistantActions(actions: AssistantAction[]): Promise<string[]> | void {
+    // A confirmed route is the rider's: edits go to it, unless they asked
+    // for a different trip altogether.
+    const mineEdits = actions.filter((a) => ["set_settings", "add_stop", "remove_stop", "improve_route"].includes(a.type));
+    if (customRoute && confirmed && !editing && !actions.some((a) => a.type === "set_trip") && mineEdits.length) {
+      const rest = actions.filter((a) => !mineEdits.includes(a));
+      if (rest.length) applyAssistantActions(rest);
+      return editMineWithAssistant(customRoute, mineEdits);
+    }
     let o = origin;
     let d = destination;
     let hills = avoidElevation;
@@ -566,6 +655,48 @@ export default function Home() {
         }
       }
     }
+  }
+
+  /**
+   * Confirm: the chosen route becomes the rider's own ("My route"). The
+   * options were only ways to choose it; from here hand edits and the
+   * assistant change THIS route.
+   */
+  function confirmRoute() {
+    if (!activeRoute) return;
+    const mine: RouteSummary =
+      selectedRouteKind === "custom"
+        ? activeRoute
+        : {
+            ...activeRoute,
+            label: activeRoute.label.startsWith("My route")
+              ? activeRoute.label
+              : `My route (${activeRoute.label.replace(/ · best effort$/, "")})`,
+            customWaypoints: activeRoute.customWaypoints ?? [],
+          };
+    setCustomRoute(mine);
+    setSelectedRouteKind("custom");
+    setHiddenRoutes((h) => h.filter((k) => k !== "custom"));
+    setFocused(true);
+    setConfirmed(true);
+  }
+
+  /** Re-plans My route through `stops` with its own settings - keeping what made it the rider's. */
+  async function replanMine(base: RouteSummary, stops: LatLng[], hills: boolean, lights: boolean): Promise<RouteSummary | null> {
+    if (!origin || !destination) return null;
+    const res = await fetch("/api/route/custom", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ origin, destination, waypoints: stops, profile: base.profile, avoidElevation: hills, fewerSignals: lights }),
+    });
+    const json = (await res.json()) as { route?: RouteSummary };
+    if (!res.ok || !json.route) return null;
+    return {
+      ...json.route,
+      label: base.label,
+      interestStops: base.interestStops,
+      acceptedSuggestions: base.acceptedSuggestions,
+    };
   }
 
   function startEditing() {
@@ -772,6 +903,16 @@ export default function Home() {
     selected: activeRoute
       ? { label: activeRoute.label, facts: describe(activeRoute).choices.map((c) => `${c.honoured ? "✓" : "✕"} ${c.text}`) }
       : null,
+    myRoute:
+      customRoute && confirmed
+        ? {
+            label: customRoute.label,
+            stops: customRoute.customWaypoints?.length ?? 0,
+            avoidsHills: customRoute.avoidedElevation,
+            fewerLights: customRoute.preferredFewerSignals,
+            summary: `${metersToMiles(customRoute.distanceMeters)} mi, ~${estimateMinutes(customRoute)} min, danger ${customRoute.meanDanger}`,
+          }
+        : null,
   };
   // Places shown belong to the route being looked at - never another one's.
   const placesForActive = activeRoute && wikiPlaces?.key === routeKey(activeRoute) ? wikiPlaces.places : null;
@@ -1408,12 +1549,12 @@ export default function Home() {
             </button>
             <button
               type="button"
-              onClick={() => setConfirmed(true)}
-              disabled={editing || !activeRoute}
+              onClick={confirmRoute}
+              disabled={editing || !activeRoute || (confirmed && selectedRouteKind === "custom")}
               title={editing ? "Save or cancel your edit first" : undefined}
               className="rounded-md bg-blue-600 px-3 py-1.5 text-sm font-medium text-white disabled:cursor-not-allowed disabled:bg-slate-300"
             >
-              Confirm route
+              {confirmed && selectedRouteKind === "custom" ? "Confirmed - this is your route" : "Confirm route"}
             </button>
           </section>
         )}
@@ -1461,9 +1602,8 @@ export default function Home() {
                   from: { label: originText, point: origin },
                   to: { label: destinationText, point: destination },
                   settings: { avoidElevation, fewerSignals },
-                  source: selectedRouteKind === "interest" ? "explore" : "route",
+                  source: activeRoute.interestStops ? "explore" : "route",
                   route: activeRoute,
-                  ...(selectedRouteKind === "interest" && interestRide ? { places: interestRide.stops } : {}),
                 })}
               />
             )}

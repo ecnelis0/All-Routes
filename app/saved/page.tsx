@@ -42,6 +42,14 @@ function describe(s: SavedRoute) {
   return describeRoute(r, String(rideMinutes(s.route)));
 }
 
+/** Places a saved ride visits: on the route itself now, in `places` for older saves. */
+function stopsOf(s: SavedRoute): { id: string; name: string; emoji: string; position: { lat: number; lng: number } }[] {
+  if (s.route.interestStops) {
+    return s.route.interestStops.map((p) => ({ id: p.id, name: p.name, emoji: p.emoji, position: { lat: p.lat, lng: p.lng } }));
+  }
+  return (s.places ?? []).map((p) => ({ id: p.id, name: p.name, emoji: emojiFor(p.category), position: p }));
+}
+
 function when(iso: string): string {
   return new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
@@ -103,11 +111,7 @@ function Saved() {
           routes={open ? [{ kind: kindOf(open), path: open.route.path, description: describe(open) }] : []}
           selectedKind={open ? kindOf(open) : null}
           focused
-          places={
-            open?.places?.map(
-              (p, i): MapPlace => ({ id: p.id, name: p.name, emoji: emojiFor(p.category), position: p, stopNumber: i + 1 })
-            ) ?? []
-          }
+          places={open ? stopsOf(open).map((p, i): MapPlace => ({ ...p, stopNumber: i + 1 })) : []}
         />
         {!open && saved.length > 0 && (
           <p className="pointer-events-none absolute left-1/2 top-4 -translate-x-1/2 rounded-full bg-white/90 px-4 py-1.5 text-sm text-slate-700 shadow">
@@ -295,13 +299,13 @@ function Detail({
         <RouteChoiceList description={description} />
       </section>
 
-      {s.places && s.places.length > 0 && (
+      {stopsOf(s).length > 0 && (
         <section className="text-xs">
           <h2 className="mb-1 font-semibold">Stops</h2>
           <ol className="flex flex-col gap-1">
-            {s.places.map((p, i) => (
+            {stopsOf(s).map((p, i) => (
               <li key={p.id}>
-                {i + 1}. {emojiFor(p.category)} {p.name}
+                {i + 1}. {p.emoji} {p.name}
               </li>
             ))}
           </ol>

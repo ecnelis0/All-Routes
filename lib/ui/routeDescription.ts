@@ -33,7 +33,7 @@ export interface DescribableRoute {
   /** Suggested edits the rider accepted - each may knowingly break a setting. */
   acceptedSuggestions?: string[];
   /** "For you" rides: places visited for the rider's interests. */
-  interestStops?: { name: string; emoji: string }[];
+  interestStops?: { name: string; emoji: string; lat?: number; lng?: number }[];
 }
 
 export interface RouteDescription {
@@ -129,7 +129,7 @@ export function describeRoute(route: DescribableRoute, minutes: string): RouteDe
   } else if (route.customWaypoints) {
     const n = route.customWaypoints.length;
     choices.push({
-      text: n > 0 ? `Your edited route · passes ${n} stop${n === 1 ? "" : "s"} you chose` : "Your edited route",
+      text: n > 0 ? `Your route · passes ${n} stop${n === 1 ? "" : "s"} you chose` : "Your route",
       honoured: true,
     });
   }

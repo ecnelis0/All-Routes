@@ -79,7 +79,7 @@ describe("describeRoute", () => {
 describe("describeRoute on an edited route", () => {
   it("says it is the rider's own route and how many stops it passes", () => {
     const r = { ...base, label: "My route (Safest + bike lanes)", customWaypoints: [{}, {}] };
-    expect(texts(r)[0]).toBe("Your edited route · passes 2 stops you chose");
+    expect(texts(r)[0]).toBe("Your route · passes 2 stops you chose");
   });
 });
 
@@ -121,7 +121,7 @@ describe("describeRoute with accepted suggestions", () => {
       acceptedSuggestions: ["Save 13 min via Noe Street - costs +598 ft climbing"],
     };
     expect(texts(r).slice(0, 2)).toEqual([
-      "Your edited route · passes 1 stop you chose",
+      "Your route · passes 1 stop you chose",
       "You chose: Save 13 min via Noe Street - costs +598 ft climbing",
     ]);
   });

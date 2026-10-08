@@ -25,7 +25,8 @@ export default function AssistantChat({
   onActions,
 }: {
   context: AssistantContext;
-  onActions: (actions: AssistantAction[]) => void;
+  /** May return notes (e.g. "Applied: save 8 min ...") to add to the reply once applied. */
+  onActions: (actions: AssistantAction[]) => Promise<string[]> | void;
 }) {
   const [open, setOpen] = useState(true);
   const [turns, setTurns] = useState<Turn[]>([]);
@@ -54,8 +55,11 @@ export default function AssistantChat({
         return;
       }
       const actions = json.actions ?? [];
-      setTurns([...history, { role: "assistant", content: json.reply, changes: describeActions(actions) }]);
-      if (actions.length) onActions(actions);
+      const reply: Turn = { role: "assistant", content: json.reply, changes: describeActions(actions) };
+      setTurns([...history, reply]);
+      const notes = actions.length ? await onActions(actions) : undefined;
+      // What actually happened (a trade-off found, or none) - not just what was asked.
+      if (notes && notes.length) setTurns([...history, { ...reply, changes: [...(reply.changes ?? []), ...notes] }]);
     } catch (e) {
       setError(e instanceof Error ? e.message : "The assistant could not answer.");
     } finally {
