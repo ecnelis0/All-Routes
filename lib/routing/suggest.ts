@@ -5,6 +5,7 @@ import {
   edgeEntersSignal,
   SIGNAL_WAIT_SECONDS,
   exemptAreaBits,
+  exemptHotspots,
   getRoutingEngine,
   MAX_CUSTOM_WAYPOINTS,
   planCustomPath,
@@ -73,16 +74,35 @@ interface SectionStats {
   lights: number;
   /** Flagged areas the stretch rides through, metres per area index. */
   areas: Map<number, number>;
+  /** Crash hotspots the stretch rides through (not counting endpoint ones). */
+  hotspots: Set<number>;
+  /** Metres descended, and the steepest block either way (as a fraction). */
+  drop: number;
+  steepest: number;
 }
 
-function sectionStats(edges: GraphEdge[], exempt: number): SectionStats {
+function sectionStats(edges: GraphEdge[], exempt: number, hotExempt: Set<number> = new Set()): SectionStats {
   const eng = getRoutingEngine();
-  const st: SectionStats = { meters: 0, climb: 0, dangerMeters: 0, lights: 0, areas: new Map() };
+  const st: SectionStats = {
+    meters: 0,
+    climb: 0,
+    dangerMeters: 0,
+    lights: 0,
+    areas: new Map(),
+    hotspots: new Set(),
+    drop: 0,
+    steepest: 0,
+  };
   for (const e of edges) {
     st.meters += e.lengthMeters;
     st.climb += Math.max(0, eng.climbMeters[e.id]);
+    st.drop += Math.max(0, -eng.climbMeters[e.id]);
+    // Short fragments are DEM noise, as everywhere else grades are read.
+    if (e.lengthMeters >= 25) st.steepest = Math.max(st.steepest, Math.abs(eng.climbMeters[e.id]) / e.lengthMeters);
     st.dangerMeters += eng.scores[e.id] * e.lengthMeters;
     if (edgeEntersSignal(eng, e.id)) st.lights++;
+    const h = eng.edgeHotspot[e.id];
+    if (h >= 0 && !hotExempt.has(h)) st.hotspots.add(h);
     let mask = eng.areaMask[e.id] & ~exempt;
     for (let i = 0; mask; i++, mask >>>= 1) {
       if (mask & 1) st.areas.set(i, (st.areas.get(i) ?? 0) + e.lengthMeters);
@@ -207,8 +227,18 @@ export function judge(base: SectionStats, cand: SectionStats, via: string): Scor
   const costs: string[] = [];
   if (minutes >= 0.5) costs.push(`+${Math.round(minutes * 10) / 10} min`);
   if (climb >= 8) costs.push(`+${ft(climb)} ft climbing`);
+  // Steep DOWNHILL is a cost too (braking, speed) - without these, "Save 8
+  // min via Steiner Street - no downside" hid Steiner's steep blocks.
+  if (cand.drop - base.drop >= 8) costs.push(`+${ft(cand.drop - base.drop)} ft downhill`);
+  if (cand.steepest >= 0.08 && cand.steepest > base.steepest + 0.03) {
+    costs.push(`steeper blocks (up to ${Math.round(cand.steepest * 100)}%)`);
+  }
   if (mc >= mb + 5) costs.push(`busier, riskier streets (danger ${Math.round(mb)} → ${Math.round(mc)})`);
   if (lights >= 1) costs.push(`+${lights} traffic light${lights === 1 ? "" : "s"}`);
+  const newHotspots = [...cand.hotspots].filter((h) => !base.hotspots.has(h)).length;
+  // Without this, an edit that only saved time by cutting through a crash
+  // hotspot read "no downside" - which is why the router had not taken it.
+  if (newHotspots > 0) costs.push(`passes through ${newHotspots} crash hotspot${newHotspots === 1 ? "" : "s"}`);
   for (const [i, meters] of cand.areas) {
     if ((base.areas.get(i) ?? 0) >= meters) continue;
     const a = SF_DANGEROUS_NEIGHBORHOODS[i];
@@ -255,6 +285,7 @@ export function suggestEdits(
   const baseNodes = nodesOf(base.path);
   // The start/end/stop areas are unavoidable and never count against a stretch.
   const exempt = exemptAreaBits(base.stops.map((n) => eng.graph.nodes[n]));
+  const hotExempt = exemptHotspots(eng, base.stops.map((n) => eng.graph.nodes[n]));
   const severeBits = SF_DANGEROUS_NEIGHBORHOODS.reduce(
     (m, a, i) => (areaTier(a.risk) === "Severe" ? m | (1 << i) : m),
     0
@@ -280,11 +311,11 @@ export function suggestEdits(
         for (const d of divergences(baseNodes, nodesOf(cand.path))) {
           const bEdges = base.path.edges.slice(d.bs, d.be);
           const cEdges = cand.path.edges.slice(d.cs, d.ce);
-          const bStats = sectionStats(bEdges, exempt);
+          const bStats = sectionStats(bEdges, exempt, hotExempt);
           if (bStats.meters < 80 && cEdges.reduce((t, e) => t + e.lengthMeters, 0) < 80) continue;
           // The hard rule: never into a Severe area the trip does not start or end in.
           if (cEdges.some((e) => (eng.areaMask[e.id] & severeBits & ~exempt) !== 0)) continue;
-          const verdict = judge(bStats, sectionStats(cEdges, exempt), viaStreets(cEdges, bEdges));
+          const verdict = judge(bStats, sectionStats(cEdges, exempt, hotExempt), viaStreets(cEdges, bEdges));
           if (!verdict) continue;
           found.push({ ...verdict, d, cand: cand.path, signature: cEdges.map((e) => e.id).join(",") });
         }

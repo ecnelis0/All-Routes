@@ -26,6 +26,8 @@ export interface DescribableRoute {
     atEndpoint: boolean;
   }[];
   areaTradeoff?: { avoidAllExtraPercent: number | null; limitPercent: number } | null;
+  /** Crash hotspots ridden through (not counting ones the trip starts/ends in). */
+  crashHotspots?: { entered: number; meters: number };
   /** Present only on a route the rider edited. */
   customWaypoints?: unknown[];
   /** Suggested edits the rider accepted - each may knowingly break a setting. */
@@ -90,6 +92,22 @@ function areaChoices(route: DescribableRoute): RouteDescription["choices"] {
           : "Avoided every High and Elevated area",
       honoured: true,
     });
+  }
+  const hot = route.crashHotspots;
+  if (hot) {
+    if (hot.entered > 0) {
+      const t = route.areaTradeoff;
+      const why =
+        t && t.avoidAllExtraPercent !== null
+          ? `staying out would make the trip ${t.avoidAllExtraPercent}% longer than Fastest (limit ${t.limitPercent}%)`
+          : "no route stays out of all of them";
+      out.push({
+        text: `Went through ${hot.entered} crash hotspot${hot.entered === 1 ? "" : "s"} (${(hot.meters / MI).toFixed(1)} mi) - ${why}`,
+        honoured: false,
+      });
+    } else {
+      out.push({ text: "Avoided every crash hotspot", honoured: true });
+    }
   }
   return out;
 }

@@ -24,12 +24,17 @@ describe("divergences", () => {
   });
 });
 
-const stats = (o: Partial<{ meters: number; climb: number; dangerMeters: number; lights: number }>) => ({
+const stats = (
+  o: Partial<{ meters: number; climb: number; dangerMeters: number; lights: number; hotspots: Set<number>; drop: number; steepest: number }>
+) => ({
   meters: 1000,
   climb: 0,
   dangerMeters: 50_000,
   lights: 0,
   areas: new Map<number, number>(),
+  hotspots: new Set<number>(),
+  drop: 0,
+  steepest: 0,
   ...o,
 });
 
@@ -67,11 +72,23 @@ describe("suggestEdits on a real route", () => {
   const eng = getRoutingEngine();
   const base = planCustomPath(A, B, [], "balanced", opts);
 
-  it("offers the owner's example: a faster way at the cost of a hill", () => {
-    const fast = s.find((x) => x.kind === "faster");
+  it("offers a faster way when Safest is a long way round, and says what it costs", () => {
+    // Marina -> Daly City: Safest keeps out of every area and hotspot at
+    // +31%, so there is real time to be bought - at a stated price.
+    const M = { lat: 37.8029843, lng: -122.4374715 };
+    const D = { lat: 37.7063084, lng: -122.4688905 };
+    const fast = suggestEdits(M, D, [], "balanced", {}).find((x) => x.kind === "faster");
     expect(fast).toBeDefined();
-    expect(fast!.headline).toMatch(/^Save \d+ min via .+ - costs .*ft climbing/);
-    expect(fast!.route.distanceMeters).toBeLessThan(base.path.distanceMeters);
+    expect(fast!.headline).toMatch(/^Save \d+ min via .+ - costs /);
+    expect(fast!.costs.length).toBeGreaterThan(0);
+  });
+
+  it("never calls an edit 'no downside' when it cuts through a hotspot or down a steep hill", () => {
+    const quicker = { meters: 600, dangerMeters: 30_000 };
+    const hot = judge(stats({}), stats({ ...quicker, hotspots: new Set([3]) }), "via X")!;
+    expect(hot.costs).toContain("passes through 1 crash hotspot");
+    const steep = judge(stats({ steepest: 0.04 }), stats({ ...quicker, drop: 30, steepest: 0.22 }), "via Steiner Street")!;
+    expect(steep.costs).toEqual(["+98 ft downhill", "steeper blocks (up to 22%)"]);
   });
 
   it("never suggests a Severe area the trip does not start or end in", () => {

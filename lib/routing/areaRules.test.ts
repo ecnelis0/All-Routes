@@ -16,7 +16,9 @@ describe("area detour rules", () => {
 
   it("takes the smaller detour when staying out of every area is too long", () => {
     const s = by.balanced;
-    expect(s.areaTradeoff?.avoidAllExtraPercent).toBeGreaterThan(AREA_DETOUR_LIMIT * 100);
+    // Either staying out is over the limit, or (null) no route stays out at all.
+    expect(s.areaTradeoff).toBeTruthy();
+    expect(s.areaTradeoff!.avoidAllExtraPercent ?? Infinity).toBeGreaterThan(AREA_DETOUR_LIMIT * 100);
     expect(s.distanceMeters).toBeLessThanOrEqual(by.fastest.distanceMeters * (1 + AREA_DETOUR_LIMIT));
     // ...going through a lower-tier area, never a Severe one.
     const entered = s.neighborhoodsEntered.filter((n) => !n.atEndpoint);
@@ -24,13 +26,20 @@ describe("area detour rules", () => {
     for (const n of entered) expect(n.tier).not.toBe("Severe");
   });
 
-  it("still stays out entirely when that is within the limit", () => {
-    // Pacific Heights -> Inner Sunset: an easy stay-out route exists.
-    const r = planRoutes({ lat: 37.806, lng: -122.441 }, { lat: 37.764, lng: -122.466 }).find(
-      (x) => x.profile === "balanced"
-    )!;
-    expect(r.areaTradeoff).toBeNull();
-    expect(r.metersInFlaggedAreas).toBe(0);
+  it("stays out of every area AND every crash hotspot when that is within the limit", () => {
+    // The owner's screenshot: Marina -> Daly City on "Safest + bike lanes"
+    // avoided all 17 flagged areas but crossed 9 crash-hotspot circles,
+    // which the router did not treat as places to avoid. Staying out of
+    // all of them costs +31% - inside the limit, so it must.
+    const rs = planRoutes({ lat: 37.8029843, lng: -122.4374715 }, { lat: 37.7063084, lng: -122.4688905 }, {
+      avoidElevation: true,
+      fewerSignals: true,
+    });
+    for (const r of rs.filter((x) => x.profile !== "fastest")) {
+      expect(r.areaTradeoff, r.label).toBeNull();
+      expect(r.metersInFlaggedAreas, r.label).toBe(0);
+      expect(r.crashHotspots.entered, r.label).toBe(0);
+    }
   });
 });
 

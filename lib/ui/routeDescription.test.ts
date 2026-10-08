@@ -83,6 +83,21 @@ describe("describeRoute on an edited route", () => {
   });
 });
 
+describe("crash hotspots", () => {
+  it("says whether the safer route kept out of crash hotspots, and why not", () => {
+    const clear = { ...base, crashHotspots: { entered: 0, meters: 0 } };
+    expect(texts(clear)).toContain("Avoided every crash hotspot");
+    const through = {
+      ...base,
+      crashHotspots: { entered: 2, meters: 640 },
+      areaTradeoff: { avoidAllExtraPercent: 55, limitPercent: 40 },
+    };
+    expect(texts(through)).toContain(
+      "Went through 2 crash hotspots (0.4 mi) - staying out would make the trip 55% longer than Fastest (limit 40%)"
+    );
+  });
+});
+
 describe("describeRoute with accepted suggestions", () => {
   it("names each trade-off the rider chose, right after the edited-route line", () => {
     const r = {

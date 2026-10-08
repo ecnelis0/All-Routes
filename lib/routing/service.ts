@@ -1,8 +1,9 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
-import type { BikeLaneTier, LatLng } from "../types";
+import type { BikeLaneTier, DangerZone, LatLng } from "../types";
 import { REAL_SF_BIKE_CRASHES } from "../dataSources/sfBikeCrashes";
+import { computeCompositeDangerZones } from "../danger";
 import { REAL_SF_HIGHWAYS } from "../dataSources/sfHighways";
 import { REAL_SF_BIKE_LANES } from "../dataSources/sfmtaBikeLanes";
 import { applySfmtaLaneTiers, type LaneMatchStats } from "../scoring/laneMatch";
@@ -74,6 +75,13 @@ export interface RoutingEngine {
   inFlaggedArea: Uint8Array;
   /** Bit i set when the edge lies in SF_DANGEROUS_NEIGHBORHOODS[i] - see areaPolicy. */
   areaMask: Uint32Array;
+  /**
+   * Crash hotspots: the same clusters Neighborhood view draws (computed by
+   * the same function from the same data, so map and router cannot
+   * disagree), and per edge the hotspot it lies in (-1 for none).
+   */
+  hotspots: DangerZone[];
+  edgeHotspot: Int16Array;
   /** Per directed edge: metres climbed travelling from `from` to `to` (negative = descent). */
   climbMeters: Float32Array;
   /** Per node: ground elevation in metres. */
@@ -283,6 +291,21 @@ export function getRoutingEngine(): RoutingEngine {
 
   const spatialIndex = new NodeSpatialIndex(graph.nodes);
 
+  // CRASH HOTSPOTS. Before these were routed around, Neighborhood view drew
+  // 52 hotspot circles the router knew nothing about as areas: Marina ->
+  // Daly City on "Safest + bike lanes" avoided all 17 flagged areas yet
+  // crossed 9 hotspots, which on the map looked like ignoring danger.
+  const hotspots = computeCompositeDangerZones(REAL_SF_BIKE_CRASHES, REAL_SF_BIKE_LANES, REAL_SF_HIGHWAYS);
+  const edgeHotspot = new Int16Array(graph.edges.length).fill(-1);
+  for (const edge of graph.edges) {
+    const a = graph.nodes[edge.from];
+    const b = graph.nodes[edge.to];
+    const mid = { lat: (a.lat + b.lat) / 2, lng: (a.lng + b.lng) / 2 };
+    // Zones come sorted worst-first, so the first hit is the worst one.
+    const i = hotspots.findIndex((z) => approxMetersBetween(mid, z.center) <= z.radiusMeters);
+    edgeHotspot[edge.id] = i;
+  }
+
   // Precomputed once: which edges lie inside a flagged neighbourhood.
   // The safer profiles refuse these outright, so this has to be a cheap
   // array lookup inside the A* inner loop rather than a geometry test.
@@ -392,6 +415,8 @@ export function getRoutingEngine(): RoutingEngine {
     steepSeverity,
     inFlaggedArea,
     areaMask,
+    hotspots,
+    edgeHotspot,
     outDegree,
     inDegree,
     inMainNetwork: mainNetwork(graph),
@@ -448,6 +473,8 @@ export interface RouteSummary {
     /** The start or destination is inside this area, so it could not be avoided. */
     atEndpoint: boolean;
   }[];
+  /** Crash hotspots ridden through, not counting any the trip starts or ends in. */
+  crashHotspots: { entered: number; meters: number };
   /**
    * Set when a safer profile went through High/Elevated areas on purpose
    * because staying out of all of them broke AREA_DETOUR_LIMIT.
@@ -616,8 +643,32 @@ export function exemptAreaBits(points: LatLng[]): number {
 
 export type AreaMode = "strict" | "budget" | "off";
 
-export function areaPolicy(eng: RoutingEngine, exempt: number, mode: AreaMode) {
+/** Crash hotspots are treated like High areas: stay out within the detour limit, else priced. */
+export const HOTSPOT_COST_PER_METRE = 1;
+
+function approxMetersBetween(a: LatLng, b: LatLng): number {
+  const dy = (a.lat - b.lat) * 111_320;
+  const dx = (a.lng - b.lng) * 111_320 * Math.cos((a.lat * Math.PI) / 180);
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+/** Hotspots containing any of these points - unavoidable, like an endpoint's area. */
+export function exemptHotspots(eng: RoutingEngine, points: LatLng[]): Set<number> {
+  const out = new Set<number>();
+  eng.hotspots.forEach((z, i) => {
+    if (points.some((p) => approxMetersBetween(p, z.center) <= z.radiusMeters)) out.add(i);
+  });
+  return out;
+}
+
+export function areaPolicy(
+  eng: RoutingEngine,
+  exempt: number,
+  mode: AreaMode,
+  hotspotExempt: Set<number> = new Set()
+) {
   const blockedBits = mode === "strict" ? ~exempt : mode === "budget" ? SEVERE_BITS & ~exempt : 0;
+  const hotspotOf = (edgeId: number) => eng.edgeHotspot[edgeId];
   const rateOf = (mask: number) => {
     let rate = 0;
     for (let i = 0; mask; i++, mask >>>= 1) {
@@ -626,12 +677,20 @@ export function areaPolicy(eng: RoutingEngine, exempt: number, mode: AreaMode) {
     return rate;
   };
   return {
-    blocked: (edgeId: number) => (eng.areaMask[edgeId] & blockedBits) !== 0,
+    blocked: (edgeId: number) => {
+      if ((eng.areaMask[edgeId] & blockedBits) !== 0) return true;
+      const h = hotspotOf(edgeId);
+      return mode === "strict" && h >= 0 && !hotspotExempt.has(h);
+    },
     // Anything inside an area that is not blocked is priced: exempt areas
-    // (to leave them directly) and, in budget mode, High/Elevated ones.
+    // (to leave them directly) and, in budget mode, High/Elevated ones and
+    // crash hotspots.
     penalty: (edgeId: number) => {
+      const len = eng.graph.edges[edgeId].lengthMeters;
       const priced = eng.areaMask[edgeId] & ~blockedBits;
-      return priced ? eng.graph.edges[edgeId].lengthMeters * rateOf(priced) : 0;
+      const areaRate = priced ? rateOf(priced) : 0;
+      const hotspotRate = mode !== "off" && hotspotOf(edgeId) >= 0 ? HOTSPOT_COST_PER_METRE : 0;
+      return len * Math.max(areaRate, hotspotRate);
     },
   };
 }
@@ -676,6 +735,9 @@ function summarize(
     nodeElevation?: Float32Array;
     /** Names of areas containing the start or destination. */
     endpointAreas?: Set<string>;
+    /** Crash hotspots: which edge lies in which, and which hold an endpoint. */
+    edgeHotspot?: Int16Array;
+    endpointHotspots?: Set<number>;
   } | null = null
 ): RouteSummary {
   const tierBreakdown: Record<BikeLaneTier, number> = {
@@ -896,6 +958,19 @@ function summarize(
       : [],
     detourWarning: detourWarningFor(route.distanceMeters, baselineMeters),
     estimatedSeconds: Math.round(estimateSeconds(route.distanceMeters, gain, signalsSeen.size)),
+    crashHotspots: (() => {
+      const hs = elevation?.edgeHotspot;
+      if (!hs) return { entered: 0, meters: 0 };
+      const ids = new Set<number>();
+      let meters = 0;
+      for (const e of route.edges) {
+        const h = hs[e.id];
+        if (h < 0 || elevation?.endpointHotspots?.has(h)) continue;
+        ids.add(h);
+        meters += e.lengthMeters;
+      }
+      return { entered: ids.size, meters: Math.round(meters) };
+    })(),
     classSpans: classSpans.map((c) => ({
       roadClass: c.roadClass,
       startMeters: Math.round(c.startMeters),
@@ -1014,8 +1089,9 @@ export function planRoutes(
     const endpointAreas = new Set(
       SF_DANGEROUS_NEIGHBORHOODS.filter((_, i) => exempt & (1 << i)).map((a) => a.name)
     );
+    const hotExempt = exemptHotspots(eng, [origin, destination, eng.graph.nodes[startNode], eng.graph.nodes[goalNode]]);
     const search = (p: RouteProfile, mode: AreaMode) => {
-      const policy = areaPolicy(eng, exempt, mode);
+      const policy = areaPolicy(eng, exempt, mode, hotExempt);
       return findRoute(eng.graph, scoreOf, startNode, goalNode, p, {
         inFlaggedArea: policy.blocked,
         extraPenalty: (edgeId: number) =>
@@ -1078,6 +1154,8 @@ export function planRoutes(
         fewerSignals,
         nodeElevation: eng.nodeElevation,
         endpointAreas,
+        endpointHotspots: hotExempt,
+        edgeHotspot: eng.edgeHotspot,
       });
       if (id === "fastest") {
         baselineEntered = new Set(summary.neighborhoodsEntered.map((n) => n.name));
@@ -1284,7 +1362,8 @@ export function planCustomPath(
   // A stop the rider placed inside an area makes that area unavoidable for
   // the legs touching it, and only that area.
   const search = (from: number, to: number, p: RouteProfile, mode: AreaMode) => {
-    const policy = areaPolicy(eng, exemptAreaBits([eng.graph.nodes[from], eng.graph.nodes[to]]), mode);
+    const ends = [eng.graph.nodes[from], eng.graph.nodes[to]];
+    const policy = areaPolicy(eng, exemptAreaBits(ends), mode, exemptHotspots(eng, ends));
     return findRoute(eng.graph, scoreOf, from, to, p, {
       inFlaggedArea: policy.blocked,
       extraPenalty: (edgeId: number) =>
@@ -1377,6 +1456,8 @@ export function summarizeCustom(
       signalAtNode: eng.signalAtNode,
       fewerSignals,
       nodeElevation: eng.nodeElevation,
+      endpointHotspots: exemptHotspots(eng, stops.map((n) => eng.graph.nodes[n])),
+      edgeHotspot: eng.edgeHotspot,
       // Areas holding the start, the destination or a stop the rider chose.
       endpointAreas: new Set(
         SF_DANGEROUS_NEIGHBORHOODS.filter(

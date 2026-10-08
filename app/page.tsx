@@ -600,9 +600,10 @@ export default function Home() {
           {showNeighborhoodView && (
             <div className="flex flex-col gap-1.5">
               <p className="text-[11px] leading-snug text-black">
-                Shaded circles are flagged neighbourhoods; small circles are crash hotspots.
-                Routing actively avoids both - the safer profiles treat area risk as a cost,
-                not a suggestion.
+                Labelled circles are flagged neighbourhoods; small unlabelled circles are
+                crash hotspots (clusters of real bike crashes). The safer routes never enter
+                Severe areas, and stay out of everything else unless that makes the trip more
+                than 40% longer than Fastest - then they say where they went through and why.
               </p>
               <div className="flex flex-wrap gap-x-3 gap-y-1">
                 {[85, 70, 55].map((risk) => (
