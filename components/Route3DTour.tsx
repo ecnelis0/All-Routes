@@ -39,6 +39,8 @@ import { ROUTE_PROFILES } from "@/lib/routing/cost";
 import type { RouteDescription } from "@/lib/ui/routeDescription";
 import { RouteDetailsToggle } from "@/components/RouteChoices";
 import ElevationPanel from "@/components/ElevationPanel";
+import { PlaceCard } from "@/components/MapView";
+import type { WikiPlace } from "@/lib/places/wikipedia";
 import { buildElevationProfile } from "@/lib/tour/elevationProfile";
 
 /**
@@ -75,6 +77,10 @@ interface Props {
   onClose: () => void;
   /** What this route is and which choices it honoured, shown on demand. */
   details?: RouteDescription;
+  /** Places along the route (Wikipedia), shown as cards while the tour passes them - on request. */
+  places?: WikiPlace[] | null;
+  /** Asks the page to load `places` - called when the rider turns Places on. */
+  onWantPlaces?: () => void;
 }
 
 /**
@@ -102,6 +108,8 @@ export default function Route3DTour({
   avoidedNearby = [],
   onClose,
   details,
+  places = null,
+  onWantPlaces,
 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MlMap | null>(null);
@@ -135,6 +143,12 @@ export default function Route3DTour({
   const buildingsRef = useRef<Awaited<ReturnType<typeof fetchCorridorBuildings>> | null>(null);
 
   const metersDone = totalMeters * progress;
+  const [showPlaces, setShowPlaces] = useState(false);
+  /** A place is "here" from a little before it comes up until just after. */
+  const PLACE_WINDOW_METERS = 350;
+  const placeHere = showPlaces
+    ? (places ?? []).find((p) => metersDone >= p.along - PLACE_WINDOW_METERS && metersDone <= p.along + PLACE_WINDOW_METERS)
+    : undefined;
   const elevationProfile = useMemo(
     () => (pathElevations ? buildElevationProfile(path, pathElevations) : null),
     [path, pathElevations]
@@ -587,6 +601,24 @@ export default function Route3DTour({
         >
           Traffic
         </button>
+        {onWantPlaces && (
+          <button
+            type="button"
+            onClick={() => {
+              const next = !showPlaces;
+              setShowPlaces(next);
+              if (next && places === null) onWantPlaces();
+            }}
+            aria-pressed={showPlaces}
+            className={`rounded-full border px-3 py-1.5 text-xs backdrop-blur transition-colors ${
+              showPlaces
+                ? "border-white/40 bg-white text-slate-900"
+                : "border-white/20 bg-slate-950/70 text-slate-200 hover:bg-white/10"
+            }`}
+          >
+            Places
+          </button>
+        )}
         <button
           type="button"
           onClick={overview}
@@ -670,6 +702,23 @@ export default function Route3DTour({
           className={`pointer-events-none absolute bottom-20 right-4 rounded bg-slate-950/70 px-2 py-1 text-[10px] text-slate-300 transition-opacity duration-500 ${fade}`}
         >
           {realBuildings.toLocaleString()} buildings · SF LiDAR footprints
+        </div>
+      )}
+      {showPlaces && (
+        // Top right, under the control row: the bottom-right corner already
+        // holds the traffic and LiDAR notes, which this overlapped.
+        <div className="pointer-events-auto absolute right-4 top-16 max-w-72" aria-live="polite">
+          {places === null ? (
+            <p className="rounded-lg bg-slate-950/80 px-3 py-2 text-xs text-white">Finding places along the way…</p>
+          ) : placeHere ? (
+            <div key={placeHere.id} className="rounded-xl bg-slate-950/85 p-3 shadow-2xl backdrop-blur">
+              <PlaceCard place={placeHere} dark />
+            </div>
+          ) : (
+            <p className="rounded-lg bg-slate-950/70 px-3 py-1.5 text-[11px] text-slate-200">
+              {places.length} places on this route · the next one appears as you reach it
+            </p>
+          )}
         </div>
       )}
       {elevationProfile && ready && (

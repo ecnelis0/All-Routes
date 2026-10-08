@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import AddressSearch from "@/components/AddressSearch";
 import MapView, { type MapPlace, type MapRoute, type MapRouteKind, type RoutePopup } from "@/components/MapView";
 import type { SuggestedEdit } from "@/lib/routing/suggest";
+import type { WikiPlace } from "@/lib/places/wikipedia";
 import { emojiFor, INTERESTS, type InterestId, type InterestRide } from "@/lib/interests/catalog";
 // Loaded lazily: maplibre-gl is ~900KB and only needed when a tour opens.
 const Route3DTour = dynamic(() => import("@/components/Route3DTour"), { ssr: false });
@@ -137,6 +138,11 @@ export default function Home() {
   const [interestBusy, setInterestBusy] = useState(false);
   const interestRequestIdRef = useRef(0);
   const [compareOpen, setCompareOpen] = useState(false);
+  // Places along the way (Wikipedia), fetched only when asked for, per route.
+  const [showPlaces, setShowPlaces] = useState(false);
+  const [wikiPlaces, setWikiPlaces] = useState<{ key: string; places: WikiPlace[] } | null>(null);
+  /** The 3D tour's own "Places" button asks for them even if the map pins are off. */
+  const [tourWantsPlaces, setTourWantsPlaces] = useState(false);
   /** The rider's saved, edited route ("My route"). */
   const [customRoute, setCustomRoute] = useState<RouteSummary | null>(null);
   // Edit mode. The route being edited is planned with `editProfile`'s
@@ -187,6 +193,34 @@ export default function Home() {
     }
     return layersPromiseRef.current;
   }
+
+  // Wikipedia places for the route being looked at, once wanted. State is
+  // only set after the fetch returns, and a stale answer for a route no
+  // longer on screen is dropped.
+  const wantPlaces = showPlaces || tourWantsPlaces;
+  const placesRoute = editing ? (draftRoute ?? editOriginal) : routeFor(selectedRouteKind);
+  const placesKey = placesRoute ? routeKey(placesRoute) : null;
+  useEffect(() => {
+    if (!wantPlaces || !placesRoute || !placesKey || wikiPlaces?.key === placesKey) return;
+    let cancelled = false;
+    fetch("/api/places", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: placesRoute.path }),
+    })
+      .then((res) => res.json() as Promise<{ places?: WikiPlace[] }>)
+      .then((json) => {
+        if (!cancelled) setWikiPlaces({ key: placesKey, places: json.places ?? [] });
+      })
+      .catch(() => {
+        if (!cancelled) setWikiPlaces({ key: placesKey, places: [] });
+      });
+    return () => {
+      cancelled = true;
+    };
+    // placesRoute is identified by placesKey; refetch only when that changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wantPlaces, placesKey, wikiPlaces?.key]);
 
   useEffect(() => {
     ensureLayersLoaded().catch(() => {
@@ -350,6 +384,10 @@ export default function Home() {
       setFocused(false);
     }
     if (origin && destination) void planInterests(origin, destination, next, avoidElevation, fewerSignals);
+  }
+
+  function routeKey(r: RouteSummary): string {
+    return `${r.distanceMeters}-${r.path.length}-${r.path[0]?.lat}-${r.path.at(-1)?.lat}`;
   }
 
   function routeFor(kind: RouteKey): RouteSummary | null {
@@ -594,6 +632,8 @@ export default function Home() {
           return [{ kind: tab.kind, path: route.path, description: describe(route) }];
         });
   const hasBothEnds = Boolean(origin && destination);
+  // Places shown belong to the route being looked at - never another one's.
+  const placesForActive = activeRoute && wikiPlaces?.key === routeKey(activeRoute) ? wikiPlaces.places : null;
 
   return (
     // min-h-0 on every flex child in this chain. Flex items default to
@@ -669,6 +709,23 @@ export default function Home() {
             <span className="font-medium">Neighborhood view</span>
             <span className="text-[11px] text-black">
               {showNeighborhoodView ? "Hide" : "Show dangerous areas"}
+            </span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowPlaces((v) => !v)}
+            aria-pressed={showPlaces}
+            disabled={!activeRoute}
+            className={`flex items-center justify-between rounded-md border px-3 py-1.5 text-left text-sm transition-colors disabled:opacity-50 ${
+              showPlaces ? "border-teal-600 bg-teal-50 text-black" : "border-slate-200 bg-white text-black hover:bg-slate-50"
+            }`}
+          >
+            <span className="flex flex-col">
+              <span className="font-medium">Places along the way</span>
+              <span className="text-[10px] text-black/55">Photos and why go, from Wikipedia</span>
+            </span>
+            <span className="text-[11px] text-black">
+              {showPlaces ? (placesForActive ? `${placesForActive.length} shown` : "Loading…") : "Show"}
             </span>
           </button>
           <div className="flex flex-col gap-1.5" data-testid="interests">
@@ -1316,6 +1373,7 @@ export default function Home() {
           onOpenSuggestion={setOpenSuggestionId}
           onUseSuggestion={applySuggestion}
           places={places}
+          wikiPlaces={showPlaces && placesForActive ? placesForActive : []}
           dangerZones={showNeighborhoodView ? (data?.dangerZones ?? []) : []}
           dangerousNeighborhoods={showNeighborhoodView ? SF_DANGEROUS_NEIGHBORHOODS : []}
         />
@@ -1342,6 +1400,8 @@ export default function Home() {
             protectedSpans={activeRoute.protectedSpans}
             avoidedNearby={activeRoute.avoidedNearby}
             details={describe(activeRoute)}
+            places={placesForActive}
+            onWantPlaces={() => setTourWantsPlaces(true)}
             onClose={() => setTourOpen(false)}
           />
         )}

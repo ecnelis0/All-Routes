@@ -9,9 +9,10 @@ import {
   neighborhoodRiskColor,
   type DangerousNeighborhood,
 } from "@/lib/data/sfDangerousNeighborhoods";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import type { RouteDescription } from "@/lib/ui/routeDescription";
 import { distanceToPath } from "@/lib/ui/geometry";
+import type { WikiPlace } from "@/lib/places/wikipedia";
 import type {
   DangerFactorScores,
   DangerZone,
@@ -120,6 +121,8 @@ interface MapViewProps {
    * emoji marker with the name on hover, so forty of them stay readable.
    */
   places?: MapPlace[];
+  /** Wikipedia places along the route (on request): photo pins with a "why go" card. */
+  wikiPlaces?: WikiPlace[];
   /**
    * "Neighborhood view" - translucent circles over the same danger zones
    * used for route-risk scoring (see `computeCompositeDangerZones`). Not
@@ -238,6 +241,7 @@ export default function MapView({
   onRemoveStop,
   suggestions = [],
   places = [],
+  wikiPlaces = [],
   openSuggestionId = null,
   onOpenSuggestion,
   onUseSuggestion,
@@ -248,6 +252,7 @@ export default function MapView({
   selectedSegmentId = null,
   onSegmentClick,
 }: MapViewProps) {
+  const [openWiki, setOpenWiki] = useState<string | null>(null);
   const lines = useMemo(
     () =>
       roadSegments.map((segment) => ({
@@ -632,8 +637,70 @@ export default function MapView({
         </OverlayViewF>
       ))}
 
+      {wikiPlaces.map((pl) => (
+        <OverlayViewF
+          key={`wiki-${pl.id}`}
+          position={{ lat: pl.lat, lng: pl.lng }}
+          mapPaneName="overlayMouseTarget"
+          getPixelPositionOffset={(w, h) => ({ x: -(w / 2), y: -(h / 2) })}
+        >
+          <button
+            type="button"
+            onClick={() => setOpenWiki(openWiki === pl.id ? null : pl.id)}
+            title={pl.title}
+            aria-label={`About ${pl.title}`}
+            data-testid="wiki-pin"
+            className="block h-9 w-9 overflow-hidden rounded-full border-2 border-white bg-white text-lg leading-8 shadow-md ring-1 ring-slate-300"
+          >
+            {pl.image ? (
+              // eslint-disable-next-line @next/next/no-img-element -- remote Wikimedia thumbnails
+              <img src={pl.image} alt="" className="h-full w-full object-cover" />
+            ) : (
+              pl.emoji
+            )}
+          </button>
+        </OverlayViewF>
+      ))}
+      {(() => {
+        const pl = wikiPlaces.find((x) => x.id === openWiki);
+        if (!pl) return null;
+        return (
+          <InfoWindowF position={{ lat: pl.lat, lng: pl.lng }} onCloseClick={() => setOpenWiki(null)}>
+            <PlaceCard place={pl} />
+          </InfoWindowF>
+        );
+      })()}
+
       {origin && <MarkerF position={origin} label={{ text: "A", color: "white" }} />}
       {destination && <MarkerF position={destination} label={{ text: "B", color: "white" }} />}
     </GoogleMap>
+  );
+}
+
+
+/** Photo, what it is, why go, and credit - shared by the map and the 3D tour. */
+export function PlaceCard({ place, dark = false }: { place: WikiPlace; dark?: boolean }) {
+  return (
+    <div className={`flex w-64 flex-col gap-1.5 text-xs ${dark ? "text-white" : "text-slate-900"}`} data-testid="place-card">
+      {place.image && (
+        // eslint-disable-next-line @next/next/no-img-element -- remote Wikimedia thumbnails
+        <img src={place.image} alt={place.title} className="h-32 w-full rounded object-cover" />
+      )}
+      <p className="text-sm font-semibold">
+        {place.emoji} {place.title}
+      </p>
+      {place.description && <p className={dark ? "text-slate-300" : "text-slate-500"}>{place.description}</p>}
+      <p className="leading-snug">
+        <span className="font-semibold">Why go: </span>
+        {place.extract}
+      </p>
+      <p className={`text-[10px] ${dark ? "text-slate-400" : "text-slate-500"}`}>
+        {place.offMeters > 30 ? `${Math.round(place.offMeters * 3.281)} ft off the route · ` : "On the route · "}
+        <a href={place.url} target="_blank" rel="noreferrer" className="underline">
+          Wikipedia
+        </a>{" "}
+        (text CC BY-SA, photo via Wikimedia Commons)
+      </p>
+    </div>
   );
 }
