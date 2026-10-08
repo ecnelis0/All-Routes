@@ -25,6 +25,8 @@ import { percentToDegrees } from "@/lib/tour/elevationProfile";
 import { insertWaypoint } from "@/lib/ui/geometry";
 import { RouteChoiceList } from "@/components/RouteChoices";
 import RouteCompare from "@/components/RouteCompare";
+import AssistantChat from "@/components/AssistantChat";
+import type { AssistantAction, AssistantContext } from "@/lib/assistant/actions";
 import SaveRouteButton from "@/components/SaveRouteButton";
 import { shortPlace } from "@/lib/saved/store";
 import type { RouteSummary } from "@/lib/routing/service";
@@ -156,6 +158,9 @@ export default function Home() {
   const [draftBusy, setDraftBusy] = useState(false);
   const [draftError, setDraftError] = useState<string | null>(null);
   const draftRequestIdRef = useRef(0);
+  // Assistant requests that must wait for a route search to finish.
+  const pendingAfterSearchRef = useRef<{ choose?: RouteKey; stops: { label: string; point: LatLng }[] } | null>(null);
+  const pendingInterestChooseRef = useRef(false);
   // Suggested edits: nothing is computed or shown until the rider asks.
   const [suggestions, setSuggestions] = useState<SuggestedEdit[] | null>(null);
   const [suggestBusy, setSuggestBusy] = useState(false);
@@ -259,7 +264,8 @@ export default function Home() {
     from: LatLng,
     to: LatLng,
     hills = avoidElevation,
-    lights = fewerSignals
+    lights = fewerSignals,
+    list = interests
   ) {
     const requestId = ++routeRequestIdRef.current;
     setRoutes({});
@@ -268,7 +274,7 @@ export default function Home() {
     setFocused(false);
     setCustomRoute(null);
     exitEditing();
-    void planInterests(from, to, interests, hills, lights);
+    void planInterests(from, to, list, hills, lights);
     setSelectedRouteKind("fastest");
     setConfirmed(false);
     setRoutingError(null);
@@ -303,6 +309,15 @@ export default function Home() {
       const byProfile: Record<string, RouteSummary> = {};
       for (const r of json.routes ?? []) byProfile[r.profile] = r;
       setRoutes(byProfile);
+      // The assistant may have asked for a route option or extra stops as
+      // part of the same request that started this search.
+      const pending = pendingAfterSearchRef.current;
+      pendingAfterSearchRef.current = null;
+      if (pending) {
+        if (pending.choose && pending.choose !== "interest") setSelectedRouteKind(pending.choose);
+        const base = byProfile[pending.choose && pending.choose !== "interest" ? pending.choose : "balanced"];
+        if (pending.stops.length && base) beginEditWithStops(base, pending.stops);
+      }
       setModelMeta(json.meta ?? null);
     } catch (err) {
       if (requestId !== routeRequestIdRef.current) return;
@@ -368,6 +383,11 @@ export default function Home() {
       const json = (await res.json()) as { rides?: (InterestRide & { route: RouteSummary })[] };
       if (id !== interestRequestIdRef.current) return;
       setInterestRides(res.ok ? (json.rides ?? []) : []);
+      if (pendingInterestChooseRef.current && res.ok && json.rides?.length) {
+        pendingInterestChooseRef.current = false;
+        setSelectedRouteKind("interest");
+        setFocused(false);
+      }
       setInterestStyle(0);
     } catch {
       if (id === interestRequestIdRef.current) setInterestRides([]);
@@ -442,6 +462,112 @@ export default function Home() {
     setDraftBusy(false);
   }
 
+  /**
+   * Edit `base` with extra stops already added - how the assistant's "go
+   * via Ocean Beach" lands. Profile is passed explicitly: state set here is
+   * not visible to replanDraft until the next render.
+   */
+  function beginEditWithStops(base: RouteSummary, extra: { point: LatLng }[]) {
+    let stops = base.customWaypoints ?? [];
+    for (const x of extra) {
+      if (stops.length >= MAX_STOPS) break;
+      stops = insertWaypoint(stops, x.point, base.path);
+    }
+    setCompareOpen(false);
+    setEditProfile(base.profile);
+    setEditOriginal(base);
+    setEditStops(stops);
+    setDraftRoute(null);
+    setDraftError(null);
+    setEditing(true);
+    setFocused(true);
+    setTourOpen(false);
+    setConfirmed(false);
+    setRoutePopup(null);
+    clearSuggestions();
+    void replanDraft(stops, base.profile);
+  }
+
+  /**
+   * Applies what the assistant decided, through the same state and
+   * planners as the hand controls. Settings, trip and interests are
+   * gathered first, so a request that changes several of them plans once.
+   */
+  function applyAssistantActions(actions: AssistantAction[]) {
+    let o = origin;
+    let d = destination;
+    let hills = avoidElevation;
+    let lights = fewerSignals;
+    let list = interests;
+    let replan = false;
+    let interestsChanged = false;
+    let choose: RouteKey | undefined;
+    const stops: { label: string; point: LatLng }[] = [];
+    for (const a of actions) {
+      if (a.type === "set_trip") {
+        if (a.from) {
+          o = a.from.point;
+          setOriginText(a.from.label);
+        }
+        if (a.to) {
+          d = a.to.point;
+          setDestinationText(a.to.label);
+        }
+        replan = true;
+      } else if (a.type === "set_settings") {
+        if (a.avoidHills !== undefined && a.avoidHills !== hills) {
+          hills = a.avoidHills;
+          replan = true;
+        }
+        if (a.fewerLights !== undefined && a.fewerLights !== lights) {
+          lights = a.fewerLights;
+          replan = true;
+        }
+      } else if (a.type === "set_interests") {
+        list = a.interests;
+        interestsChanged = true;
+      } else if (a.type === "choose_route") {
+        choose = a.option;
+      } else if (a.type === "add_stop") {
+        stops.push(a);
+      } else if (a.type === "show_places") {
+        setShowPlaces(a.on);
+      }
+    }
+    setOrigin(o);
+    setDestination(d);
+    setAvoidElevation(hills);
+    setFewerSignals(lights);
+    setInterests(list);
+    if (!o || !d) return; // nothing to plan yet - the settings still stick
+
+    // Set before either planner starts: the interest planner can finish
+    // before the main search, and must already know to select "For you".
+    // Only when a planner is about to run - otherwise it would fire on some
+    // later, unrelated plan.
+    pendingInterestChooseRef.current = choose === "interest" && (replan || interestsChanged);
+    if (replan) {
+      resetRouteState();
+      pendingAfterSearchRef.current = { choose, stops };
+      void startRouteSearch(o, d, hills, lights, list);
+      return;
+    }
+    if (interestsChanged) void planInterests(o, d, list, hills, lights);
+    if (choose && !(choose === "interest" && interestsChanged)) selectRouteTab(choose);
+    if (stops.length) {
+      const base = editing ? (draftRoute ?? editOriginal) : routeFor(choose ?? selectedRouteKind);
+      if (base) {
+        if (editing) {
+          let next = editStops;
+          for (const x of stops) if (next.length < MAX_STOPS) next = insertWaypoint(next, x.point, base.path);
+          updateStops(next);
+        } else {
+          beginEditWithStops(base, stops);
+        }
+      }
+    }
+  }
+
   function startEditing() {
     const base = routeFor(selectedRouteKind);
     if (!base) return;
@@ -460,7 +586,7 @@ export default function Home() {
     setRoutePopup(null);
   }
 
-  async function replanDraft(stops: LatLng[]) {
+  async function replanDraft(stops: LatLng[], profile: RouteProfileId = editProfile) {
     if (!origin || !destination) return;
     const id = ++draftRequestIdRef.current;
     setDraftBusy(true);
@@ -473,7 +599,7 @@ export default function Home() {
           origin,
           destination,
           waypoints: stops,
-          profile: editProfile,
+          profile,
           avoidElevation,
           fewerSignals,
         }),
@@ -632,6 +758,21 @@ export default function Home() {
           return [{ kind: tab.kind, path: route.path, description: describe(route) }];
         });
   const hasBothEnds = Boolean(origin && destination);
+  const assistantContext: AssistantContext = {
+    from: originText || null,
+    to: destinationText || null,
+    settings: { avoidHills: avoidElevation, fewerLights: fewerSignals },
+    interests,
+    routes: tabs.flatMap((t) => {
+      const r = routeFor(t.kind);
+      return r
+        ? [`${t.kind === "interest" ? "For you" : r.label}: ${metersToMiles(r.distanceMeters)} mi, ~${estimateMinutes(r)} min, danger ${r.meanDanger}, climb ${Math.round(r.elevationGainMeters * 3.281)} ft, ${r.trafficSignals} lights`]
+        : [];
+    }),
+    selected: activeRoute
+      ? { label: activeRoute.label, facts: describe(activeRoute).choices.map((c) => `${c.honoured ? "✓" : "✕"} ${c.text}`) }
+      : null,
+  };
   // Places shown belong to the route being looked at - never another one's.
   const placesForActive = activeRoute && wikiPlaces?.key === routeKey(activeRoute) ? wikiPlaces.places : null;
 
@@ -646,6 +787,8 @@ export default function Home() {
           <h1 className="text-lg font-bold text-black">🚲 Safe Route</h1>
           <p className="mt-1 text-xs text-black">San Francisco, CA</p>
         </div>
+
+        <AssistantChat context={assistantContext} onActions={applyAssistantActions} />
 
         <section className="flex flex-col gap-2">
           <h2 className="text-xs font-semibold uppercase tracking-wide text-black">
@@ -903,8 +1046,8 @@ export default function Home() {
                   <p className="text-sm font-semibold">Based on {editOriginal.label}</p>
                   <p className="mt-0.5 leading-snug text-black/70">
                     Click the map (or the route) to add a stop it must pass through. Drag a stop to
-                    move it; click a stop to remove it. Between stops it still follows{" "}
-                    {editOriginal.label.replace(/ · best effort$/, "")}&apos;s rules.
+                    move it; click a stop to remove it. Between stops it keeps the same rules as{" "}
+                    {editOriginal.label.replace(/ · best effort$/, "")}.
                   </p>
                 </div>
 
