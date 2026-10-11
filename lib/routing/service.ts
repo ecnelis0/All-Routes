@@ -1413,7 +1413,56 @@ export function planCustomPath(
     joined.distanceMeters += leg.distanceMeters;
     joined.costMeters += leg.costMeters;
   }
-  return { path: joined, bestEffort, stops };
+  return { path: pruneSpurs(joined, eng.graph.nodes), bestEffort, stops };
+}
+
+/**
+ * Longest out-and-back cut from a route, round trip. A stop is "pass
+ * through this exact point"; when that point snaps onto a side street or
+ * a path just off the road, the route rode in, turned round and rode back
+ * the same way - 60 m into Ocean Beach, or a U-turn loop off 10th Avenue
+ * in the owner's screenshot. Passing within half this distance counts as
+ * visiting the stop. A longer out-and-back is kept: then the place really
+ * is down a dead end, and the rider asked to go there.
+ */
+export const SPUR_PRUNE_MAX_METERS = 300;
+
+/**
+ * Removes short out-and-backs: an edge immediately followed by its own
+ * reverse is a U-turn; peeling those pairs repeatedly collapses a whole
+ * spur from its tip outwards, as long as the spur stays under the limit.
+ */
+export function pruneSpurs(route: RoutePath, nodes: LatLng[], maxMeters = SPUR_PRUNE_MAX_METERS): RoutePath {
+  const edges = route.edges.slice();
+  let changed = false;
+  for (let i = 1; i < edges.length; i++) {
+    const a = edges[i - 1];
+    const b = edges[i];
+    if (a.from !== b.to || a.to !== b.from) continue;
+    // Grow the spur outwards from this U-turn while it keeps mirroring.
+    let lo = i - 1;
+    let hi = i;
+    let len = a.lengthMeters + b.lengthMeters;
+    while (lo > 0 && hi < edges.length - 1) {
+      const x = edges[lo - 1];
+      const y = edges[hi + 1];
+      if (x.from !== y.to || x.to !== y.from || len + x.lengthMeters + y.lengthMeters > maxMeters) break;
+      lo--;
+      hi++;
+      len += x.lengthMeters + y.lengthMeters;
+    }
+    if (len > maxMeters) continue;
+    edges.splice(lo, hi - lo + 1);
+    changed = true;
+    i = Math.max(0, lo - 1); // the join may expose an outer U-turn
+  }
+  if (!changed || edges.length === 0) return route;
+  return {
+    edges,
+    path: [nodes[edges[0].from], ...edges.map((e) => nodes[e.to])],
+    distanceMeters: edges.reduce((t, e) => t + e.lengthMeters, 0),
+    costMeters: route.costMeters,
+  };
 }
 
 /** Summarises a custom path (planned, or spliced by suggested edits) as "My route". */

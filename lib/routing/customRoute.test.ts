@@ -37,9 +37,12 @@ describe("planCustomRoute (edited routes)", () => {
 
   it("passes through every stop, in the order given", () => {
     const r = planCustomRoute(START, END, [STOP_A, STOP_B], "balanced");
-    // Each stop is a street corner, so the route passes right by it.
-    expect(distanceToPath(STOP_A, r.path)).toBeLessThan(40);
-    expect(distanceToPath(STOP_B, r.path)).toBeLessThan(40);
+    // "Passes" a stop = within half the spur limit: a stop the route would
+    // only touch by riding in and straight back out is passed by instead
+    // (see pruneSpurs). It never undoes a stop that forces a street - that
+    // is ridden through, not doubled back on.
+    expect(distanceToPath(STOP_A, r.path)).toBeLessThan(150);
+    expect(distanceToPath(STOP_B, r.path)).toBeLessThan(150);
     expect(alongOf(STOP_A, r.path)).toBeLessThan(alongOf(STOP_B, r.path));
     expect(r.label).toBe("My route (Safest)");
     expect(r.customWaypoints).toEqual([STOP_A, STOP_B]);
@@ -86,5 +89,54 @@ describe("stops on isolated paths", () => {
     const eng = getRoutingEngine();
     const share = eng.inMainNetwork.reduce((a, b) => a + b, 0) / eng.inMainNetwork.length;
     expect(share).toBeGreaterThan(0.9);
+  });
+});
+
+import { pruneSpurs, SPUR_PRUNE_MAX_METERS, planCustomPath, getRoutingEngine } from "./service";
+import type { GraphEdge } from "./graph";
+
+describe("pointless out-and-backs to a stop", () => {
+  const nodes = Array.from({ length: 10 }, (_, i) => ({ lat: 37.7 + i * 0.001, lng: -122.4 }));
+  const e = (from: number, to: number, len: number): GraphEdge => ({
+    id: from * 100 + to,
+    from,
+    to,
+    name: null,
+    roadClass: "residential",
+    tier: "none",
+    lengthMeters: len,
+    maxspeed: null,
+  });
+  const route = (edges: GraphEdge[]) => ({ edges, path: [], distanceMeters: edges.reduce((t, x) => t + x.lengthMeters, 0), costMeters: 0 });
+
+  it("cuts a short ride-in-and-back, however many blocks deep", () => {
+    // 0 -> 1 -> 2 -> 3 (stop) -> 2 -> 1 -> 4: the 1..3 spur is 2 x 60 m.
+    const r = pruneSpurs(route([e(0, 1, 100), e(1, 2, 30), e(2, 3, 30), e(3, 2, 30), e(2, 1, 30), e(1, 4, 100)]), nodes);
+    expect(r.edges.map((x) => `${x.from}>${x.to}`)).toEqual(["0>1", "1>4"]);
+    expect(r.distanceMeters).toBe(200);
+  });
+
+  it("keeps a long one - then the place really is down a dead end", () => {
+    const deep = SPUR_PRUNE_MAX_METERS; // one way, so the round trip is twice the limit
+    const r = pruneSpurs(route([e(0, 1, 100), e(1, 2, deep), e(2, 1, deep), e(1, 4, 100)]), nodes);
+    expect(r.edges).toHaveLength(4);
+  });
+
+  it("on the real network: a stop at Ocean Beach no longer detours into the sand and back", () => {
+    // Reproduced from the owner's screenshot flow: Marina -> Stonestown on
+    // Safest + bike lanes, then "add Ocean Beach" - the stop snapped onto a
+    // beach path and the route rode 60 m in and back out.
+    const A = { lat: 37.8029843, lng: -122.4374715 };
+    const B = { lat: 37.7274507, lng: -122.4749029 };
+    const OB = { lat: 37.7561513, lng: -122.510185 };
+    const plan = planCustomPath(A, B, [OB], "safest", { avoidElevation: true, fewerSignals: true });
+    const edges = plan.path.edges;
+    for (let i = 1; i < edges.length; i++) {
+      const uTurn = edges[i - 1].from === edges[i].to && edges[i - 1].to === edges[i].from;
+      expect(uTurn, `U-turn at edge ${i}`).toBe(false);
+    }
+    // ...and still visits Ocean Beach.
+    expect(distanceToPath(OB, plan.path.path)).toBeLessThan(SPUR_PRUNE_MAX_METERS / 2 + 50);
+    expect(getRoutingEngine().graph.nodes.length).toBeGreaterThan(0);
   });
 });

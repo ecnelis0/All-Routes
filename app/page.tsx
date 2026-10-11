@@ -869,12 +869,27 @@ export default function Home() {
   ];
   // Pins for the "For you" ride when it is the one being looked at.
   const showRidePins = !editing && selectedRouteKind === "interest" && interestRide;
+  // My route's stops are always pinned: a route that bends towards a stop
+  // the rider cannot see looks like it went somewhere "for no reason".
+  const mineShown = !editing && selectedRouteKind === "custom" && customRoute ? customRoute : null;
   const places: MapPlace[] = showRidePins
     ? [
         ...interestRide.stops.map((p, i) => ({ id: p.id, name: p.name, emoji: emojiFor(p.category), position: p, stopNumber: i + 1 })),
         ...interestRide.along.map((p) => ({ id: p.id, name: p.name, emoji: emojiFor(p.category), position: p })),
       ]
-    : [];
+    : mineShown
+      ? (mineShown.customWaypoints ?? []).map((w, i) => {
+          // A For-you stop keeps its name; one the rider or assistant added is "Stop N".
+          const named = mineShown.interestStops?.find((p) => Math.abs(p.lat - w.lat) < 1e-6 && Math.abs(p.lng - w.lng) < 1e-6);
+          return {
+            id: `mine-${i}-${w.lat}-${w.lng}`,
+            name: named?.name ?? `Stop ${i + 1}`,
+            emoji: named?.emoji ?? "📍",
+            position: w,
+            stopNumber: i + 1,
+          };
+        })
+      : [];
   const mapRoutes: MapRoute[] = editing
     ? activeRoute
       ? [{ kind: "custom", path: activeRoute.path, description: describe(activeRoute) }]
