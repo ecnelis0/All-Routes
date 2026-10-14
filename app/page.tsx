@@ -138,6 +138,13 @@ export default function Home() {
   const [interestRides, setInterestRides] = useState<(InterestRide & { route: RouteSummary })[] | null>(null);
   const [interestStyle, setInterestStyle] = useState(0);
   const [interestBusy, setInterestBusy] = useState(false);
+  // "For you" as the assistant customized it: one ride with its own rules,
+  // hill/light settings and stops. While set, it IS the "For you" option;
+  // it is planned on its own, so the other options and the settings above
+  // are untouched by it - and it is untouched by them.
+  const [forYouCustom, setForYouCustom] = useState<RouteSummary | null>(null);
+  const [forYouBusy, setForYouBusy] = useState(false);
+  const forYouRequestIdRef = useRef(0);
   const interestRequestIdRef = useRef(0);
   const [compareOpen, setCompareOpen] = useState(false);
   // Places along the way (Wikipedia), fetched only when asked for, per route.
@@ -345,12 +352,14 @@ export default function Home() {
   // Google's route just appears as soon as you've entered A and B).
   function updateOrigin(value: LatLng | null) {
     setOrigin(value);
+    clearForYouCustom();
     resetRouteState();
     if (value && destination) void startRouteSearch(value, destination);
   }
 
   function updateDestination(value: LatLng | null) {
     setDestination(value);
+    clearForYouCustom();
     resetRouteState();
     if (origin && value) void startRouteSearch(origin, value);
   }
@@ -408,9 +417,72 @@ export default function Home() {
     }
   }
 
+  /** A new trip, or interests picked by hand, replace the customized ride. */
+  function clearForYouCustom() {
+    forYouRequestIdRef.current++;
+    setForYouCustom(null);
+    setForYouBusy(false);
+  }
+
+  /**
+   * Plans the assistant's customized ride as the "For you" option. Its
+   * rules, hills and lights come from the request, not from the sidebar,
+   * and nothing else is re-planned. Returns a note for the chat.
+   */
+  async function planForYouCustom(
+    from: LatLng,
+    to: LatLng,
+    spec: Extract<AssistantAction, { type: "for_you_route" }>
+  ): Promise<string[]> {
+    const id = ++forYouRequestIdRef.current;
+    setForYouBusy(true);
+    try {
+      // Ordered along the trip, like stops added by hand.
+      let waypoints: LatLng[] = [];
+      for (const s of spec.stops.slice(0, MAX_STOPS)) waypoints = insertWaypoint(waypoints, s.point, [from, to]);
+      const res = await fetch("/api/route/custom", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          origin: from,
+          destination: to,
+          waypoints,
+          profile: spec.basedOn,
+          avoidElevation: spec.avoidHills,
+          fewerSignals: spec.fewerLights,
+        }),
+      });
+      const json = (await res.json()) as { route?: RouteSummary; error?: string };
+      if (id !== forYouRequestIdRef.current) return [];
+      if (!res.ok || !json.route) return [`Couldn't plan that ride: ${json.error ?? `error ${res.status}`}`];
+      const route: RouteSummary = {
+        ...json.route,
+        label: `For you${json.route.label.endsWith("· best effort") ? " · best effort" : ""}`,
+        interestStops: waypoints.map((w, i) => {
+          const s = spec.stops.find((x) => x.point.lat === w.lat && x.point.lng === w.lng);
+          return { id: `foryou-${i}`, name: s?.name ?? `Stop ${i + 1}`, emoji: s?.emoji ?? "📍", lat: w.lat, lng: w.lng };
+        }),
+      };
+      setForYouCustom(route);
+      // Show it beside the others rather than instead of them.
+      if (editing) exitEditing();
+      setSelectedRouteKind("interest");
+      setHiddenRoutes((h) => h.filter((k) => k !== "interest"));
+      setConfirmed(false);
+      setFocused(false);
+      setRoutePopup(null);
+      return [`For you is ready: ${metersToMiles(route.distanceMeters)} mi, ~${estimateMinutes(route)} min`];
+    } catch (err) {
+      return id === forYouRequestIdRef.current ? [`Couldn't plan that ride: ${err instanceof Error ? err.message : "unknown error"}`] : [];
+    } finally {
+      if (id === forYouRequestIdRef.current) setForYouBusy(false);
+    }
+  }
+
   function toggleInterest(id: InterestId) {
     const next = interests.includes(id) ? interests.filter((x) => x !== id) : [...interests, id];
     setInterests(next);
+    clearForYouCustom();
     if (selectedRouteKind === "interest") {
       setSelectedRouteKind("fastest");
       setFocused(false);
@@ -423,7 +495,7 @@ export default function Home() {
   }
 
   function routeFor(kind: RouteKey): RouteSummary | null {
-    if (kind === "interest") return interestRides?.[interestStyle]?.route ?? null;
+    if (kind === "interest") return forYouCustom ?? interestRides?.[interestStyle]?.route ?? null;
     return kind === "custom" ? customRoute : (routes[kind] ?? null);
   }
 
@@ -580,8 +652,9 @@ export default function Home() {
     const mineEdits = actions.filter((a) => ["set_settings", "add_stop", "remove_stop", "improve_route"].includes(a.type));
     if (customRoute && confirmed && !editing && !actions.some((a) => a.type === "set_trip") && mineEdits.length) {
       const rest = actions.filter((a) => !mineEdits.includes(a));
-      if (rest.length) applyAssistantActions(rest);
-      return editMineWithAssistant(customRoute, mineEdits);
+      const restNotes = rest.length ? applyAssistantActions(rest) : undefined;
+      const mineNotes = editMineWithAssistant(customRoute, mineEdits);
+      return Promise.all([restNotes ?? [], mineNotes]).then((n) => n.flat());
     }
     let o = origin;
     let d = destination;
@@ -591,6 +664,7 @@ export default function Home() {
     let replan = false;
     let interestsChanged = false;
     let choose: RouteKey | undefined;
+    let forYou: Extract<AssistantAction, { type: "for_you_route" }> | undefined;
     const stops: { label: string; point: LatLng }[] = [];
     for (const a of actions) {
       if (a.type === "set_trip") {
@@ -621,6 +695,8 @@ export default function Home() {
         stops.push(a);
       } else if (a.type === "show_places") {
         setShowPlaces(a.on);
+      } else if (a.type === "for_you_route") {
+        forYou = a;
       }
     }
     setOrigin(o);
@@ -629,6 +705,12 @@ export default function Home() {
     setFewerSignals(lights);
     setInterests(list);
     if (!o || !d) return; // nothing to plan yet - the settings still stick
+
+    // A different trip or hand-picked interests replace the customized
+    // ride; a new one asked for in the same breath is then planned for the
+    // trip as it now stands.
+    if (actions.some((a) => a.type === "set_trip") || interestsChanged) clearForYouCustom();
+    const forYouNotes = forYou ? planForYouCustom(o, d, forYou) : undefined;
 
     // Set before either planner starts: the interest planner can finish
     // before the main search, and must already know to select "For you".
@@ -639,7 +721,7 @@ export default function Home() {
       resetRouteState();
       pendingAfterSearchRef.current = { choose, stops };
       void startRouteSearch(o, d, hills, lights, list);
-      return;
+      return forYouNotes;
     }
     if (interestsChanged) void planInterests(o, d, list, hills, lights);
     if (choose && !(choose === "interest" && interestsChanged)) selectRouteTab(choose);
@@ -655,6 +737,7 @@ export default function Home() {
         }
       }
     }
+    return forYouNotes;
   }
 
   /**
@@ -852,26 +935,44 @@ export default function Home() {
   const interestLabel = INTERESTS.filter((i) => interests.includes(i.id))
     .map((i) => i.emoji)
     .join(" ");
+  const forYouStopCount = forYouCustom?.customWaypoints?.length ?? 0;
   const tabs: { kind: RouteKey; label: string; hint: string }[] = [
     ...ROUTE_TABS,
-    ...(interests.length > 0
+    ...(forYouCustom || forYouBusy
       ? [
           {
             kind: "interest" as const,
-            label: `For you ${interestLabel}`,
-            hint: interestRide
-              ? `${interestRide.styleLabel} · ${interestRide.stops.length} stop${interestRide.stops.length === 1 ? "" : "s"} you'd like`
-              : "Places you like, on the way",
+            label: "For you ✨",
+            hint: forYouCustom
+              ? `Customized with the assistant · ${forYouStopCount} stop${forYouStopCount === 1 ? "" : "s"}`
+              : "Customized with the assistant",
           },
         ]
-      : []),
+      : interests.length > 0
+        ? [
+            {
+              kind: "interest" as const,
+              label: `For you ${interestLabel}`,
+              hint: interestRide
+                ? `${interestRide.styleLabel} · ${interestRide.stops.length} stop${interestRide.stops.length === 1 ? "" : "s"} you'd like`
+                : "Places you like, on the way",
+            },
+          ]
+        : []),
     ...(customRoute ? [{ kind: "custom" as const, label: "My route", hint: "Your edited route" }] : []),
   ];
   // Pins for the "For you" ride when it is the one being looked at.
-  const showRidePins = !editing && selectedRouteKind === "interest" && interestRide;
+  const showRidePins = !editing && selectedRouteKind === "interest" && !forYouCustom && interestRide;
   // My route's stops are always pinned: a route that bends towards a stop
   // the rider cannot see looks like it went somewhere "for no reason".
-  const mineShown = !editing && selectedRouteKind === "custom" && customRoute ? customRoute : null;
+  // The customized "For you" ride pins its stops the same way.
+  const mineShown = editing
+    ? null
+    : selectedRouteKind === "custom"
+      ? customRoute
+      : selectedRouteKind === "interest"
+        ? forYouCustom
+        : null;
   const places: MapPlace[] = showRidePins
     ? [
         ...interestRide.stops.map((p, i) => ({ id: p.id, name: p.name, emoji: emojiFor(p.category), position: p, stopNumber: i + 1 })),
@@ -928,6 +1029,15 @@ export default function Home() {
             summary: `${metersToMiles(customRoute.distanceMeters)} mi, ~${estimateMinutes(customRoute)} min, danger ${customRoute.meanDanger}`,
           }
         : null,
+    forYou: forYouCustom
+      ? {
+          basedOn: forYouCustom.profile,
+          avoidsHills: forYouCustom.avoidedElevation,
+          fewerLights: forYouCustom.preferredFewerSignals,
+          stops: (forYouCustom.interestStops ?? []).map((p) => p.name),
+        }
+      : null,
+    points: origin && destination ? { origin, destination } : null,
   };
   // Places shown belong to the route being looked at - never another one's.
   const placesForActive = activeRoute && wikiPlaces?.key === routeKey(activeRoute) ? wikiPlaces.places : null;
@@ -1128,7 +1238,7 @@ export default function Home() {
                     <span className="text-[11px] text-black">
                       {route
                         ? `${metersToMiles(route.distanceMeters)} mi \u00b7 ~${estimateMinutes(route)} min`
-                        : computingSafer || (tab.kind === "interest" && interestBusy)
+                        : computingSafer || (tab.kind === "interest" && (interestBusy || forYouBusy))
                           ? "Computing\u2026"
                           : "\u2014"}
                     </span>
@@ -1348,7 +1458,7 @@ export default function Home() {
 
             {activeRoute && (
               <div className="flex flex-col gap-1 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-black">
-                {selectedRouteKind === "interest" && !editing && interestRides && interestRides.length > 1 && (
+                {selectedRouteKind === "interest" && !editing && !forYouCustom && interestRides && interestRides.length > 1 && (
                   <div className="mb-1 flex gap-1" role="group" aria-label="Ride style">
                     {interestRides.map((r, i) => (
                       <button

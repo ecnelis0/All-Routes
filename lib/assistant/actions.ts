@@ -20,7 +20,28 @@ export type AssistantAction =
   | { type: "remove_stop"; stop: number }
   /** My route: apply the best suggested edit of this kind. */
   | { type: "improve_route"; goal: ImproveGoal }
-  | { type: "show_places"; on: boolean };
+  | { type: "show_places"; on: boolean }
+  /**
+   * "For you": one ride built from everything the rider asked for at once -
+   * which rules to ride by, hills, lights, and the places to pass. It has
+   * its own settings and is planned on its own, so it changes neither the
+   * other options nor the sidebar's settings.
+   */
+  | {
+      type: "for_you_route";
+      basedOn: ForYouBase;
+      avoidHills: boolean;
+      fewerLights: boolean;
+      stops: ForYouStop[];
+    };
+
+/** Which option's rules a customized "For you" ride follows. */
+export type ForYouBase = "fastest" | "balanced" | "safest";
+export interface ForYouStop {
+  name: string;
+  emoji: string;
+  point: LatLng;
+}
 
 /** What the assistant is told about the screen, so it can answer "why" questions. */
 export interface AssistantContext {
@@ -38,6 +59,10 @@ export interface AssistantContext {
    * options - the options were only ways to choose it.
    */
   myRoute: { label: string; stops: number; avoidsHills: boolean; fewerLights: boolean; summary: string } | null;
+  /** The customized "For you" ride, if the assistant has built one - so a follow-up can restate it with a change. */
+  forYou?: { basedOn: ForYouBase; avoidsHills: boolean; fewerLights: boolean; stops: string[] } | null;
+  /** Where the trip starts and ends, for finding places "on the way". Not shown to the model. */
+  points?: { origin: LatLng; destination: LatLng } | null;
 }
 
 export interface ChatMessage {
@@ -72,6 +97,15 @@ export function describeActions(actions: AssistantAction[]): string[] {
         return `Looking for a ${{ faster: "faster", flatter: "flatter", safer: "safer", "fewer-lights": "fewer-lights" }[a.goal]} change to your route`;
       case "show_places":
         return a.on ? "Showing places along the way" : "Hiding places";
+      case "for_you_route":
+        return [
+          `For you: ${{ fastest: "Fastest", balanced: "Safest", safest: "Safest + bike lanes" }[a.basedOn]} rules`,
+          a.avoidHills && "avoids hills",
+          a.fewerLights && "fewer lights",
+          a.stops.length > 0 && `via ${a.stops.map((s) => s.name).join(", ")}`,
+        ]
+          .filter(Boolean)
+          .join(" · ");
     }
   });
 }

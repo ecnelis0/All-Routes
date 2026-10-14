@@ -85,6 +85,32 @@ function insideSevere(p: LatLng): boolean {
 }
 
 /**
+ * One place of a kind for the assistant's "boba in Chinatown" / "a beach on
+ * the way": the closest to `near`, or to the line of the trip. Never inside
+ * a Severe area, like every other place the planner picks.
+ */
+export const NEAR_PLACE_MAX_METERS = 1200;
+
+export function nearestPlace(
+  category: PlaceInterest,
+  where: { near: LatLng } | { line: LatLng[] },
+  exclude: ReadonlySet<string> = new Set(),
+  pois: Poi[] = ALL_POIS
+): Poi | null {
+  let best: Poi | null = null;
+  let bestMeters = "near" in where ? NEAR_PLACE_MAX_METERS : Infinity;
+  for (const p of pois) {
+    if (p.category !== category || exclude.has(p.id) || insideSevere(p)) continue;
+    const m = distanceToPath(p, "near" in where ? [where.near, where.near] : where.line);
+    if (m < bestMeters) {
+      best = p;
+      bestMeters = m;
+    }
+  }
+  return best;
+}
+
+/**
  * Picks places for one style: round-robin across the chosen categories so
  * each interest is represented, closest-to-the-line first, spaced out along
  * the trip, until the stop count or detour budget runs out.

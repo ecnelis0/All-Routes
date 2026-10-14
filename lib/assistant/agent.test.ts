@@ -2,11 +2,18 @@ import { describe, expect, it, vi } from "vitest";
 import { MockLanguageModelV4 } from "ai/test";
 import { runAssistant, systemPrompt } from "./agent";
 import { describeActions, type AssistantContext } from "./actions";
+import { haversineMeters } from "../geo";
+import { distanceToPath } from "../ui/geometry";
 
-// No network in tests: "Ocean Beach" resolves, "Atlantis" does not.
+// No network in tests: "Ocean Beach" and "Chinatown" resolve, "Atlantis" does not.
+const lookups = vi.hoisted(() => ({ asked: [] as string[] }));
 vi.mock("../geocode", () => ({
-  geocode: async (q: string) =>
-    /ocean beach/i.test(q) ? [{ label: "Ocean Beach, Sunset District, San Francisco", lat: 37.7561, lng: -122.5102 }] : [],
+  geocode: async (q: string) => {
+    lookups.asked.push(q);
+    if (/ocean beach/i.test(q)) return [{ label: "Ocean Beach, Sunset District, San Francisco", lat: 37.7561, lng: -122.5102 }];
+    if (/chinatown/i.test(q)) return [{ label: "Chinatown, San Francisco", lat: 37.7941, lng: -122.4078 }];
+    return [];
+  },
 }));
 
 const usage = {
@@ -116,6 +123,74 @@ describe("route assistant", () => {
       confirmed
     );
     expect(missing.actions).toEqual([]);
+  });
+
+  describe("a customized 'For you' ride", () => {
+    const CHINATOWN = { lat: 37.7941, lng: -122.4078 };
+    const trip: AssistantContext = {
+      ...ctx,
+      points: { origin: { lat: 37.8029843, lng: -122.4374715 }, destination: { lat: 37.7274507, lng: -122.4749029 } },
+    };
+    const ask = (stops: object[], c: AssistantContext = trip) =>
+      runAssistant(
+        scripted([{ toolName: "make_for_you_route", input: { basedOn: "balanced", avoidHills: true, fewerLights: false, stops } }], "Built it."),
+        [{ role: "user", content: "avoid hills and dangerous neighborhoods, but still pass chinatown for boba and food" }],
+        c
+      );
+
+    it("is one action holding the whole request, with real places near where the rider said", async () => {
+      lookups.asked.length = 0;
+      const out = await ask([{ place: "Chinatown", kind: "boba" }, { place: "Chinatown", kind: "food" }, { place: "Ocean Beach" }]);
+      expect(out.actions).toHaveLength(1);
+      const a = out.actions[0];
+      if (a.type !== "for_you_route") throw new Error(`got ${a.type}`);
+      expect(a).toMatchObject({ basedOn: "balanced", avoidHills: true, fewerLights: false });
+      expect(a.stops.map((s) => s.emoji)).toEqual(["🧋", "🍜", "📍"]);
+      // The boba and food stops are different places, both in walking reach of Chinatown.
+      expect(a.stops[0].name).not.toBe(a.stops[1].name);
+      for (const s of a.stops.slice(0, 2)) expect(haversineMeters(s.point, CHINATOWN)).toBeLessThan(1200);
+      expect(a.stops[2]).toEqual({ name: "Ocean Beach", emoji: "📍", point: { lat: 37.7561, lng: -122.5102 } });
+      // "Chinatown" was asked for twice and looked up once.
+      expect(lookups.asked.filter((q) => /chinatown/i.test(q))).toHaveLength(1);
+      expect(describeActions(out.actions)[0]).toMatch(/^For you: Safest rules · avoids hills · via .+, .+, Ocean Beach$/);
+    });
+
+    it("finds a kind of place on the way when no neighbourhood is named", async () => {
+      const out = await ask([{ kind: "park" }]);
+      const a = out.actions[0];
+      if (a?.type !== "for_you_route") throw new Error("no ride");
+      expect(a.stops[0].emoji).toBe("🌳");
+      // On the way: close to the straight line of the trip, not across town.
+      expect(distanceToPath(a.stops[0].point, [trip.points!.origin, trip.points!.destination])).toBeLessThan(300);
+    });
+
+    it("builds nothing without a trip, or with a place it could not find", async () => {
+      expect((await ask([{ place: "Chinatown" }], ctx)).actions).toEqual([]);
+      expect((await ask([{ place: "Atlantis", kind: "boba" }])).actions).toEqual([]);
+      expect((await ask([{}])).actions).toEqual([]);
+    });
+
+    it("is planned for the trip set in the same reply", async () => {
+      const out = await runAssistant(
+        scripted(
+          [
+            { toolName: "set_trip", input: { from: "Chinatown", to: "Ocean Beach" } },
+            { toolName: "make_for_you_route", input: { basedOn: "fastest", avoidHills: false, fewerLights: true, stops: [{ kind: "coffee" }] } },
+          ],
+          "Done."
+        ),
+        [{ role: "user", content: "chinatown to ocean beach, few lights, coffee on the way" }],
+        { ...ctx, from: null, to: null }
+      );
+      expect(out.actions.map((a) => a.type)).toEqual(["set_trip", "for_you_route"]);
+    });
+
+    it("the model is told what the ride holds now, and to ask for it in one call - but not the coordinates", () => {
+      const p = systemPrompt({ ...trip, forYou: { basedOn: "balanced", avoidsHills: true, fewerLights: false, stops: ["Boba Guys"] } });
+      expect(p).toContain("ONE call to");
+      expect(p).toContain("Boba Guys");
+      expect(p).not.toContain("37.8029843");
+    });
   });
 
   it("is told that once confirmed, requests edit the rider's own route", () => {

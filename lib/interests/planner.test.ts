@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ALONG_METERS, choosePlaces, planInterestRoutes, STYLE, type Poi } from "./planner";
+import { ALONG_METERS, choosePlaces, nearestPlace, NEAR_PLACE_MAX_METERS, planInterestRoutes, STYLE, type Poi } from "./planner";
 import { distanceToPath } from "../ui/geometry";
 import { areaTier } from "../routing/service";
 import { SF_DANGEROUS_NEIGHBORHOODS } from "../data/sfDangerousNeighborhoods";
@@ -104,5 +104,33 @@ describe("second pass on a reshaped, longer ride", () => {
     const late = poi("boba-late", "boba", 4000, 50);
     const picked = choosePlaces([late], ["boba"], line, 3000, "relaxed");
     expect(picked.map((p) => p.id)).toEqual(["boba-late"]);
+  });
+});
+
+describe("nearestPlace (one stop of a kind, for the assistant)", () => {
+  const pois = [
+    poi("boba-far", "boba", 4000, 0),
+    poi("boba-near", "boba", 1100, 50),
+    poi("food-nearest", "food", 1000, 10),
+    poi("boba-off-line", "boba", 2500, 900),
+  ];
+
+  it("picks the closest of that kind to the place named, never another kind", () => {
+    expect(nearestPlace("boba", { near: at(1000) }, new Set(), pois)?.id).toBe("boba-near");
+  });
+
+  it("skips one already used, and gives up beyond walking reach", () => {
+    expect(nearestPlace("boba", { near: at(1000) }, new Set(["boba-near"]), pois)).toBeNull();
+    expect(distanceToPath(at(4000), [at(1000), at(1000)])).toBeGreaterThan(NEAR_PLACE_MAX_METERS);
+  });
+
+  it("with no place named, picks the one closest to the line of the trip", () => {
+    expect(nearestPlace("boba", { line: [at(0), at(5000)] }, new Set(["boba-far"]), pois)?.id).toBe("boba-near");
+  });
+
+  it("never picks a place inside a Severe area, however close", () => {
+    const severe = SF_DANGEROUS_NEIGHBORHOODS.find((a) => areaTier(a.risk) === "Severe")!;
+    const inside: Poi = { id: "inside", category: "boba", name: "inside", ...severe.center };
+    expect(nearestPlace("boba", { near: severe.center }, new Set(), [inside])).toBeNull();
   });
 });

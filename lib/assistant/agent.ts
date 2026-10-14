@@ -1,8 +1,10 @@
 import { generateText, isStepCount, tool, type LanguageModel } from "ai";
 import { z } from "zod";
 import { geocode } from "../geocode";
-import { INTERESTS, type InterestId } from "../interests/catalog";
-import type { AssistantAction, AssistantContext, ChatMessage } from "./actions";
+import { emojiFor, INTERESTS, type InterestId, type PlaceInterest } from "../interests/catalog";
+import { nearestPlace } from "../interests/planner";
+import type { LatLng } from "../types";
+import type { AssistantAction, AssistantContext, ChatMessage, ForYouStop } from "./actions";
 
 /**
  * The route assistant: reads what the rider asks plus what is on screen,
@@ -15,6 +17,9 @@ import type { AssistantAction, AssistantContext, ChatMessage } from "./actions";
  */
 
 const INTEREST_IDS = INTERESTS.map((i) => i.id) as [string, ...string[]];
+/** Kinds of place a stop can be - every interest that is a place (not "bike paths"). */
+const PLACE_KINDS = INTERESTS.map((i) => i.id).filter((id) => id !== "bikepaths") as [string, ...string[]];
+const MAX_FOR_YOU_STOPS = 8;
 
 export function systemPrompt(ctx: AssistantContext): string {
   return [
@@ -34,8 +39,16 @@ export function systemPrompt(ctx: AssistantContext): string {
     "it with hills/lights preferences (its stops are kept), and improve_route for 'make it faster / flatter / safer /",
     "fewer lights'. Do not change the trip (set_trip) unless the rider asks for a different start or destination.",
     "",
+    "A ride of the rider's own, described in one go - several wishes together ('avoid hills and dangerous neighbourhoods,",
+    "but still pass Chinatown for boba and food'), or 'make me a new / custom / different option' - is ONE call to",
+    "make_for_you_route with everything in it. It becomes the 'For you' option, beside the others: it changes no other",
+    "option and no setting, so do NOT also call set_settings, set_interests or add_stop for the same request. To change it",
+    "later, call make_for_you_route again with the whole ride restated ('forYou' below is what it holds now).",
+    "A request about a named option ('based on the fastest route, go via X') is not that: use choose_route then add_stop.",
+    "",
     "What is on screen now:",
-    JSON.stringify(ctx, null, 1),
+    // Coordinates are for the tools, not for the model to reason about.
+    JSON.stringify({ ...ctx, points: undefined }, null, 1),
   ].join("\n");
 }
 
@@ -45,9 +58,30 @@ export async function runAssistant(
   ctx: AssistantContext
 ): Promise<{ reply: string; actions: AssistantAction[] }> {
   const actions: AssistantAction[] = [];
-  const findPlace = async (q: string) => {
-    const [hit] = await geocode(q, 1);
-    return hit ? { label: hit.label, point: { lat: hit.lat, lng: hit.lng } } : null;
+  // One lookup per place name: "boba and food in Chinatown" asks for Chinatown twice.
+  const found = new Map<string, Promise<{ label: string; point: LatLng } | null>>();
+  const findPlace = (q: string) => {
+    const key = q.trim().toLowerCase();
+    let hit = found.get(key);
+    if (!hit) {
+      hit = geocode(q, 1).then(([h]) => (h ? { label: h.label, point: { lat: h.lat, lng: h.lng } } : null));
+      found.set(key, hit);
+    }
+    return hit;
+  };
+  // Tool calls of one reply run together, and set_trip waits on a lookup:
+  // a ride asked for alongside a new trip must wait for that trip.
+  let tripSet: Promise<unknown> = Promise.resolve();
+  /** Both ends of the trip: as just set in this reply, else as on screen. */
+  const tripLine = (): LatLng[] | null => {
+    let from = ctx.points?.origin;
+    let to = ctx.points?.destination;
+    for (const a of actions) {
+      if (a.type !== "set_trip") continue;
+      from = a.from?.point ?? from;
+      to = a.to?.point ?? to;
+    }
+    return from && to ? [from, to] : null;
   };
 
   const result = await generateText({
@@ -62,13 +96,14 @@ export async function runAssistant(
           from: z.string().optional().describe("Start, e.g. 'Marina Green'"),
           to: z.string().optional().describe("Destination, e.g. 'Ocean Beach'"),
         }),
-        execute: async ({ from, to }) => {
-          const a = from ? await findPlace(from) : undefined;
-          const b = to ? await findPlace(to) : undefined;
-          if ((from && !a) || (to && !b)) return { ok: false, error: `Could not find ${!a && from ? from : to} in San Francisco.` };
-          actions.push({ type: "set_trip", from: a ?? undefined, to: b ?? undefined });
-          return { ok: true, from: a?.label, to: b?.label };
-        },
+        execute: ({ from, to }) =>
+          (tripSet = (async () => {
+            const a = from ? await findPlace(from) : undefined;
+            const b = to ? await findPlace(to) : undefined;
+            if ((from && !a) || (to && !b)) return { ok: false, error: `Could not find ${!a && from ? from : to} in San Francisco.` };
+            actions.push({ type: "set_trip", from: a ?? undefined, to: b ?? undefined });
+            return { ok: true, from: a?.label, to: b?.label };
+          })()),
       }),
       set_settings: tool({
         description: "Turn 'Avoid hills' and/or 'Fewer traffic lights' on or off.",
@@ -126,6 +161,54 @@ export async function runAssistant(
           if (!ctx.myRoute) return { ok: false, error: "There is no confirmed route yet - confirm one first." };
           actions.push({ type: "improve_route", goal });
           return { ok: true, note: "The app will apply the best such edit and show its cost, or say none exists." };
+        },
+      }),
+      make_for_you_route: tool({
+        description:
+          "Build the rider's own ride from everything they asked for and offer it as the 'For you' option, beside the others. Needs a start and destination. Replaces any earlier 'For you' ride.",
+        inputSchema: z.object({
+          basedOn: z
+            .enum(["fastest", "balanced", "safest"])
+            .describe(
+              "Rules to ride by. fastest = quickest, avoids nothing. balanced = Safest: stays out of dangerous neighbourhoods and crash hotspots. safest = the same and keeps to protected bike lanes."
+            ),
+          avoidHills: z.boolean(),
+          fewerLights: z.boolean(),
+          stops: z
+            .array(
+              z.object({
+                place: z.string().optional().describe("A place or neighbourhood in San Francisco, e.g. 'Chinatown', 'Ferry Building'"),
+                kind: z
+                  .enum(PLACE_KINDS)
+                  .optional()
+                  .describe("A kind of place to stop at. With `place`: one in or near it ('boba in Chinatown'). Alone: one on the way."),
+              })
+            )
+            .max(MAX_FOR_YOU_STOPS)
+            .describe("Places to pass, in any order - the app orders them along the trip."),
+        }),
+        execute: async ({ basedOn, avoidHills, fewerLights, stops }) => {
+          await tripSet;
+          const line = tripLine();
+          if (!line) return { ok: false, error: "There is no trip yet - set a start and destination first." };
+          const out: ForYouStop[] = [];
+          const used = new Set<string>();
+          for (const s of stops) {
+            const near = s.place ? await findPlace(s.place) : undefined;
+            if (s.place && !near) return { ok: false, error: `Could not find ${s.place} in San Francisco.` };
+            if (!s.kind) {
+              if (!near) return { ok: false, error: "Each stop needs a place, a kind, or both." };
+              out.push({ name: near.label.split(",")[0], emoji: "📍", point: near.point });
+              continue;
+            }
+            const kind = s.kind as PlaceInterest;
+            const poi = nearestPlace(kind, near ? { near: near.point } : { line }, used);
+            if (!poi) return { ok: false, error: `Could not find ${kind}${s.place ? ` near ${s.place}` : " on the way"}.` };
+            used.add(poi.id);
+            out.push({ name: poi.name, emoji: emojiFor(kind), point: { lat: poi.lat, lng: poi.lng } });
+          }
+          actions.push({ type: "for_you_route", basedOn, avoidHills, fewerLights, stops: out });
+          return { ok: true, stops: out.map((s) => s.name), note: "The app plans it and reports its length, or that it could not." };
         },
       }),
       show_places: tool({
