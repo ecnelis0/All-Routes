@@ -66,6 +66,10 @@ interface Props {
   avoidElevation: boolean;
   fewerSignals: boolean;
   onExit: () => void;
+  /** Called once, when the rider reaches the destination. */
+  onArrived?: () => void;
+  /** A line under "You have arrived", e.g. what finishing the ride unlocks. */
+  arrivedHint?: string;
   /** What this route is and which choices it honoured, shown on demand. */
   details?: RouteDescription;
   /**
@@ -140,6 +144,8 @@ export default function NavigationView({
   avoidElevation,
   fewerSignals,
   onExit,
+  onArrived,
+  arrivedHint,
   details,
   waypoints,
 }: Props) {
@@ -491,6 +497,14 @@ export default function NavigationView({
   const showThen = after && next && after.atMeters - next.atMeters < 150;
   const arrived = match?.state.arrived ?? false;
   const offRoute = match?.state.offRoute ?? false;
+  // Told once per arrival, whatever the parent re-renders with meanwhile.
+  const onArrivedRef = useRef(onArrived);
+  useEffect(() => {
+    onArrivedRef.current = onArrived;
+  }, [onArrived]);
+  useEffect(() => {
+    if (arrived) onArrivedRef.current?.();
+  }, [arrived]);
   const arrivalClock =
     fixTime === null
       ? null
@@ -634,6 +648,7 @@ export default function NavigationView({
             <p className="text-2xl font-bold text-slate-900">
               You have arrived
             </p>
+            {arrivedHint && <p className="mt-1 max-w-64 text-sm text-slate-600">{arrivedHint}</p>}
             <button
               type="button"
               onClick={onExit}

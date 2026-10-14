@@ -1,5 +1,5 @@
 import type { RouteSummary } from "../routing/service";
-import type { Poi } from "../interests/catalog";
+import { emojiFor, type Poi } from "../interests/catalog";
 import type { LatLng } from "../types";
 
 /**
@@ -28,7 +28,35 @@ export interface SavedRoute {
   route: RouteSummary;
   /** Explore rides: the places it visits, in order. */
   places?: Poi[];
+  /** When the rider last navigated this route to its destination. Photos can be added from then on. */
+  completedAt?: string;
+  /** Photos from the ride, each on one pinned location - see `pinsOf`. */
+  photos?: RidePhoto[];
 }
+
+/**
+ * A photo the rider added to a pinned location after riding the route.
+ * Only this record is kept here: the image itself is far too big for
+ * localStorage and lives in lib/saved/photoFiles.ts under the same id.
+ */
+export interface RidePhoto {
+  id: string;
+  /** Which pin it belongs to - an id from `pinsOf`. */
+  pinId: string;
+  addedAt: string;
+}
+
+/** A place on a saved route that photos can be pinned to. */
+export interface RoutePin {
+  id: string;
+  name: string;
+  emoji: string;
+  position: LatLng;
+  /** 1-based visiting order for stops; absent for the start and destination. */
+  stopNumber?: number;
+}
+
+export const MAX_PHOTOS_PER_ROUTE = 30;
 
 /** The subset of the Storage API this needs - injectable for tests. */
 export interface KeyValueStore {
@@ -79,7 +107,7 @@ export function saveRoute(
   const saved: SavedRoute = {
     ...entry,
     name: entry.name.trim() || `${entry.from.label} → ${entry.to.label}`,
-    id: `${now.getTime().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    id: newId(now),
     savedAt: now.toISOString(),
   };
   write([saved, ...loadSaved(store)], store); // newest first
@@ -98,6 +126,66 @@ export function renameSaved(id: string, name: string, store: KeyValueStore | nul
   if (!trimmed) return;
   write(
     loadSaved(store).map((r) => (r.id === id ? { ...r, name: trimmed } : r)),
+    store
+  );
+}
+
+function newId(now: Date): string {
+  return `${now.getTime().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/**
+ * The pinned locations of a saved route, in riding order: where it starts,
+ * every stop, and where it ends. Stops are named places when the route
+ * knows them (a "For you" ride), else the rider's own "Stop N".
+ */
+export function pinsOf(s: SavedRoute): RoutePin[] {
+  const named = s.route.interestStops
+    ? s.route.interestStops.map((p) => ({ id: p.id, name: p.name, emoji: p.emoji, position: { lat: p.lat, lng: p.lng } }))
+    : s.places
+      ? s.places.map((p) => ({ id: p.id, name: p.name, emoji: emojiFor(p.category), position: { lat: p.lat, lng: p.lng } }))
+      : (s.route.customWaypoints ?? []).map((w, i) => ({ id: `stop-${i + 1}`, name: `Stop ${i + 1}`, emoji: "📍", position: w }));
+  return [
+    { id: "start", name: shortPlace(s.from.label), emoji: "🚩", position: s.from.point },
+    ...named.map((p, i) => ({ ...p, stopNumber: i + 1 })),
+    { id: "end", name: shortPlace(s.to.label), emoji: "🏁", position: s.to.point },
+  ];
+}
+
+/** The rider navigated this route to the end - from now on it can hold photos. */
+export function markCompleted(id: string, store: KeyValueStore | null = browserStore(), now: Date = new Date()) {
+  write(
+    loadSaved(store).map((r) => (r.id === id ? { ...r, completedAt: now.toISOString() } : r)),
+    store
+  );
+}
+
+/** Records a photo on one pin of a completed route. The caller stores the image under the returned id. */
+export function addPhoto(
+  routeId: string,
+  pinId: string,
+  store: KeyValueStore | null = browserStore(),
+  now: Date = new Date()
+): RidePhoto {
+  const list = loadSaved(store);
+  const route = list.find((r) => r.id === routeId);
+  if (!route) throw new SaveError("That saved route no longer exists.");
+  if (!route.completedAt) throw new SaveError("Finish navigating this route first - then you can add photos to it.");
+  if (!pinsOf(route).some((p) => p.id === pinId)) throw new SaveError("That pinned location is not on this route.");
+  if ((route.photos ?? []).length >= MAX_PHOTOS_PER_ROUTE) {
+    throw new SaveError(`A route can hold ${MAX_PHOTOS_PER_ROUTE} photos - remove one first.`);
+  }
+  const photo: RidePhoto = { id: newId(now), pinId, addedAt: now.toISOString() };
+  write(
+    list.map((r) => (r.id === routeId ? { ...r, photos: [...(r.photos ?? []), photo] } : r)),
+    store
+  );
+  return photo;
+}
+
+export function removePhoto(routeId: string, photoId: string, store: KeyValueStore | null = browserStore()) {
+  write(
+    loadSaved(store).map((r) => (r.id === routeId ? { ...r, photos: (r.photos ?? []).filter((p) => p.id !== photoId) } : r)),
     store
   );
 }

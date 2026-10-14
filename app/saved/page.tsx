@@ -7,10 +7,12 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useMemo, useState } from "react";
 import MapView, { type MapPlace, type MapRouteKind } from "@/components/MapView";
 import ProfileChart from "@/components/ProfileChart";
+import RidePhotos from "@/components/RidePhotos";
 import { RouteChoiceList } from "@/components/RouteChoices";
 import { emojiFor } from "@/lib/interests/catalog";
 import { buildManeuvers, formatDistance } from "@/lib/nav/instructions";
-import { deleteSaved, renameSaved, shortPlace, type SavedRoute } from "@/lib/saved/store";
+import { browserPhotoFiles, deleteSavedWithPhotos } from "@/lib/saved/photoFiles";
+import { markCompleted, pinsOf, renameSaved, shortPlace, type SavedRoute } from "@/lib/saved/store";
 import { useSavedRoutes } from "@/lib/saved/useSavedRoutes";
 import { buildElevationProfile, percentToDegrees } from "@/lib/tour/elevationProfile";
 import { compareRoutes } from "@/lib/ui/compareRoutes";
@@ -48,6 +50,17 @@ function stopsOf(s: SavedRoute): { id: string; name: string; emoji: string; posi
     return s.route.interestStops.map((p) => ({ id: p.id, name: p.name, emoji: p.emoji, position: { lat: p.lat, lng: p.lng } }));
   }
   return (s.places ?? []).map((p) => ({ id: p.id, name: p.name, emoji: emojiFor(p.category), position: p }));
+}
+
+/**
+ * What the map pins: the stops - and, once the route has photos, every
+ * pinned location that holds some, with how many.
+ */
+function placesOf(s: SavedRoute): MapPlace[] {
+  const count = (pinId: string) => (s.photos ?? []).filter((p) => p.pinId === pinId).length;
+  return pinsOf(s)
+    .filter((pin) => pin.stopNumber !== undefined || count(pin.id) > 0)
+    .map((pin) => ({ ...pin, stopNumber: pin.stopNumber ?? 0, photoCount: count(pin.id) }));
 }
 
 function when(iso: string): string {
@@ -111,7 +124,7 @@ function Saved() {
           routes={open ? [{ kind: kindOf(open), path: open.route.path, description: describe(open) }] : []}
           selectedKind={open ? kindOf(open) : null}
           focused
-          places={open ? stopsOf(open).map((p, i): MapPlace => ({ ...p, stopNumber: i + 1 })) : []}
+          places={open ? placesOf(open) : []}
         />
         {!open && saved.length > 0 && (
           <p className="pointer-events-none absolute left-1/2 top-4 -translate-x-1/2 rounded-full bg-white/90 px-4 py-1.5 text-sm text-slate-700 shadow">
@@ -140,6 +153,14 @@ function Saved() {
             fewerSignals={open.settings.fewerSignals}
             details={describe(open)}
             waypoints={open.route.customWaypoints}
+            onArrived={() => {
+              try {
+                markCompleted(open.id);
+              } catch {
+                /* storage full or off: the ride still ends normally */
+              }
+            }}
+            arrivedHint="Press Done to add photos to this route's pinned locations."
             onExit={() => setNavSource(null)}
           />
         )}
@@ -312,6 +333,8 @@ function Detail({
         </section>
       )}
 
+      <RidePhotos s={s} />
+
       <section className="text-xs" data-testid="saved-stats">
         <h2 className="mb-1 font-semibold">The numbers</h2>
         <table className="w-full">
@@ -402,7 +425,9 @@ function Detail({
             <button
               type="button"
               onClick={() => {
-                deleteSaved(s.id);
+                void deleteSavedWithPhotos(s.id, browserPhotoFiles()).catch(() => {
+                  /* the route is gone either way; an orphaned image is only wasted space */
+                });
                 onDeleted();
               }}
               className="rounded-md bg-red-600 px-3 py-1.5 text-xs font-semibold text-white"

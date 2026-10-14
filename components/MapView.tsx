@@ -34,8 +34,10 @@ export interface MapPlace {
   name: string;
   emoji: string;
   position: LatLng;
-  /** 1-based visiting order for stops; absent for places merely passed. */
+  /** 1-based visiting order for stops; absent for places merely passed. 0 = pinned, but not a numbered stop (start, destination). */
   stopNumber?: number;
+  /** Ride photos saved on this pin (Saved tab). */
+  photoCount?: number;
 }
 
 export interface MapSuggestion {
@@ -620,10 +622,13 @@ export default function MapView({
               className="flex items-center gap-1 whitespace-nowrap rounded-full border-2 border-teal-600 bg-white px-2 py-0.5 text-[11px] font-semibold text-slate-900 shadow"
               data-testid="place-stop"
             >
-              <span className="flex h-4 w-4 items-center justify-center rounded-full bg-teal-600 text-[10px] text-white">
-                {pl.stopNumber}
-              </span>
+              {pl.stopNumber > 0 && (
+                <span className="flex h-4 w-4 items-center justify-center rounded-full bg-teal-600 text-[10px] text-white">
+                  {pl.stopNumber}
+                </span>
+              )}
               {pl.emoji} {pl.name}
+              {pl.photoCount ? <span data-testid="place-photos">· 📷 {pl.photoCount}</span> : null}
             </span>
           ) : (
             <span
