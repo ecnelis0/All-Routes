@@ -5,6 +5,11 @@ project: what it does, how the pieces connect, what software/services it
 depends on, where the data comes from, and a running log of what was built in
 each phase. Keep it updated as the project evolves.
 
+> **Note:** the overview sections below describe the early prototype (mock
+> crash data, Google Directions with detour waypoints). The app has since moved
+> to real DataSF/SFMTA data and its own A* router; see [`README.md`](./README.md)
+> for what it does today, and the build log and `git log` for how it got there.
+
 ## Progress checklist
 
 Check this section first for an at-a-glance status. See "Build log" at the
